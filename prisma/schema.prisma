@@ -1,0 +1,196 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "./generated"
+}
+
+// Prisma ORM v7: connection URL dipindah ke prisma.config.ts (bukan lagi di sini)
+datasource db {
+  provider = "postgresql"
+}
+
+// ENUMS
+enum Role {
+  ADMIN
+  SELLER
+  BUYER
+}
+
+enum ProductStatus {
+  AVAILABLE
+  OUT_OF_STOCK
+  HIDDEN
+}
+
+enum OrderStatus {
+  PENDING // menunggu pembayaran
+  PROCESSING // dibayar, sedang diproses penjual
+  SHIPPED // dikirim
+  READY_FOR_PICKUP // siap diambil (opsional, untuk penjual lokal)
+  COMPLETED // selesai
+  CANCELLED // dibatalkan
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+}
+
+// MODELS
+
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String // bcrypt hash — jangan pernah simpan password plaintext
+  role      Role     @default(BUYER)
+  address   String?
+  isActive  Boolean  @default(true) // admin dapat menonaktifkan akun
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relationships
+  store    Store?    // Seller can have 1 store
+  orders   Order[]   // Buyer can have many orders
+  reviews  Review[]  // Buyer can have many reviews
+  sessions Session[] // Active login sessions
+
+  @@index([email])
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique // SHA-256 dari token cookie — token asli tidak disimpan di DB
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  // Relationships
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Store {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  storeName   String
+  description String?
+  location    String?
+  image       String? // URL foto/logo toko (opsional)
+  isActive    Boolean  @default(true) // admin dapat menonaktifkan toko
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relationships
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  products Product[]
+
+  @@index([storeName])
+}
+
+model Category {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+
+  // Relationships
+  products Product[]
+
+  @@index([name])
+}
+
+model Product {
+  id          String        @id @default(uuid())
+  storeId     String
+  categoryId  String
+  name        String
+  description String?
+  price       Decimal       @db.Decimal(12, 2)
+  stock       Int           @default(0)
+  image       String?
+  status      ProductStatus @default(AVAILABLE)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  // Relationships
+  store      Store       @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  category   Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  orderItems OrderItem[]
+  reviews    Review[]
+
+  @@index([storeId])
+  @@index([categoryId])
+  @@index([name])
+}
+
+model Order {
+  id              String      @id @default(uuid())
+  buyerId         String
+  total           Decimal     @db.Decimal(12, 2)
+  status          OrderStatus @default(PENDING)
+  shippingAddress String
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  // Relationships
+  buyer      User        @relation(fields: [buyerId], references: [id], onDelete: Restrict)
+  orderItems OrderItem[]
+  payment    Payment?    // pembayaran dummy, 1 order maksimal 1 pembayaran
+
+  @@index([buyerId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// Pembayaran (MVP: dummy/manual transfer). Status payment terpisah dari status order.
+model Payment {
+  id        String        @id @default(uuid())
+  orderId   String        @unique // 1 order = 1 record pembayaran
+  method    String @default("dummy") // dummy | transfer_manual
+  amount    Decimal       @db.Decimal(12, 2)
+  status    PaymentStatus @default(PENDING)
+  paidAt    DateTime? // diisi saat status menjadi PAID
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+model OrderItem {
+  id        String  @id @default(uuid())
+  orderId   String
+  productId String
+  quantity  Int
+  price     Decimal @db.Decimal(12, 2) // Price at the time of purchase
+
+  // Relationships
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model Review {
+  id        String   @id @default(uuid())
+  productId String
+  buyerId   String
+  rating    Int      @default(5) // constraint via application logic, typically 1-5
+  comment   String?
+  createdAt DateTime @default(now())
+
+  // Relationships
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  buyer   User    @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+
+  @@unique([buyerId, productId]) // 1 pembeli hanya 1 ulasan per produk
+  @@index([productId])
+  @@index([buyerId])
+}

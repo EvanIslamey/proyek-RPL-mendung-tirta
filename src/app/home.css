@@ -1,0 +1,239 @@
+/* Home Page Specific Styles */
+
+.navbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  background: var(--glass-bg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  z-index: 1000;
+  border-bottom: 1px solid var(--border-color);
+  transition: var(--transition-normal);
+}
+
+.nav-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 70px;
+}
+
+.logo {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.logo span {
+  color: var(--secondary);
+}
+
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+}
+
+.nav-links a {
+  font-weight: 500;
+  transition: var(--transition-fast);
+}
+
+.nav-links a:hover {
+  color: var(--primary);
+}
+
+/* Tombol hamburger (hanya mobile) */
+.nav-burger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 1.15rem;
+  line-height: 1;
+  padding: 6px 10px;
+  cursor: pointer;
+  color: var(--text-main);
+}
+
+/* Autentikasi (AuthNav) */
+.nav-user {
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.nav-logout {
+  padding: 8px 18px;
+  background: transparent;
+  color: var(--primary);
+  border: 1px solid var(--primary);
+  font-size: 0.9rem;
+}
+
+.nav-logout:hover {
+  background: var(--primary);
+  color: #fff;
+}
+
+.nav-logout:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Hero Section */
+.hero {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  padding-top: 70px; /* Offset for navbar */
+  background: radial-gradient(circle at top right, rgba(32, 178, 170, 0.1), transparent),
+              radial-gradient(circle at bottom left, rgba(15, 82, 186, 0.1), transparent);
+}
+
+.hero-content {
+  text-align: center;
+  max-width: 800px;
+  z-index: 2;
+}
+
+.hero h1 {
+  font-size: 4rem;
+  line-height: 1.1;
+  margin-bottom: 1.5rem;
+  background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.hero-subtitle {
+  font-size: 1.25rem;
+  color: var(--text-muted);
+  margin-bottom: 2.5rem;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+}
+
+/* Features */
+.features-section {
+  padding: 6rem 0;
+  background-color: var(--bg-card);
+}
+
+.section-title {
+  text-align: center;
+  font-size: 2.5rem;
+  margin-bottom: 4rem;
+}
+
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 2rem;
+}
+
+.feature-card {
+  padding: 2.5rem;
+  border-radius: 16px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  text-align: center;
+  transition: var(--transition-normal);
+}
+
+.feature-card:hover {
+  transform: translateY(-5px);
+  box-shadow: var(--shadow-md);
+  border-color: var(--primary-light);
+}
+
+.feature-icon {
+  font-size: 3rem;
+  margin-bottom: 1.5rem;
+}
+
+.feature-card h3 {
+  margin-bottom: 1rem;
+  font-size: 1.5rem;
+}
+
+.feature-card p {
+  color: var(--text-muted);
+}
+
+/* Tentang Kami */
+.about-section {
+  padding: 6rem 0;
+}
+
+.about-content {
+  max-width: 800px;
+  text-align: center;
+}
+
+.about-content p {
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  line-height: 1.8;
+  margin-bottom: 1.25rem;
+}
+
+.about-content strong {
+  color: var(--primary);
+}
+
+/* Footer */
+.footer {
+  padding: 2rem 0;
+  text-align: center;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-muted);
+}
+
+/* Animations */
+.animate-fade-up {
+  animation: fadeInUp 0.8s ease-out forwards;
+  opacity: 0;
+}
+
+.delay-1 { animation-delay: 0.2s; }
+.delay-2 { animation-delay: 0.4s; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .hero h1 { font-size: 2.5rem; }
+  .hero-actions { flex-direction: column; }
+
+  .nav-burger { display: inline-flex; }
+
+  /* Mobile: link disembunyikan; muncul sebagai panel dropdown saat dibuka */
+  .nav-links {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: 0.35rem 1rem 0.9rem;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border-color);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+  }
+
+  .nav-links.open { display: flex; }
+
+  .nav-links a:not(.auth-link) {
+    padding: 0.7rem 0.25rem;
+    border-bottom: 1px solid var(--border-color);
+  }
+}

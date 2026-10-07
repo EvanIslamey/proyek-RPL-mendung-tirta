@@ -1,0 +1,223 @@
+/* Halaman detail produk /products/[id] */
+
+.detail-main {
+  flex: 1;
+  padding-top: 1.75rem;
+  padding-bottom: 4rem;
+}
+
+.detail-breadcrumb {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  margin-bottom: 1.5rem;
+}
+
+.detail-breadcrumb a {
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.detail-breadcrumb a:hover {
+  text-decoration: underline;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 2.5rem;
+  align-items: start;
+}
+
+.detail-media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 360px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(15, 82, 186, 0.12), rgba(32, 178, 170, 0.16));
+  border: 1px solid var(--border-color);
+}
+
+.detail-emoji {
+  font-size: 7rem;
+}
+
+.detail-category {
+  display: inline-block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--secondary);
+  margin-bottom: 0.5rem;
+}
+
+.detail-info h1 {
+  font-size: 2rem;
+  line-height: 1.2;
+  margin-bottom: 0.75rem;
+}
+
+.detail-rating {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  margin-bottom: 1rem;
+}
+
+.detail-stars {
+  color: #f59e0b;
+  letter-spacing: 2px;
+}
+
+.detail-price {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--primary);
+  margin-bottom: 1.25rem;
+}
+
+.detail-facts {
+  display: grid;
+  gap: 0.6rem;
+  padding: 1.1rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  margin-bottom: 1.5rem;
+}
+
+.detail-facts > div {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.detail-facts dt {
+  min-width: 80px;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.detail-facts dd {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.detail-stock-out {
+  color: #b91c1c;
+  background: #fee2e2;
+  padding: 1px 10px;
+  border-radius: 999px;
+  font-size: 0.85rem;
+}
+
+.detail-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.75rem;
+}
+
+.detail-add-btn,
+.detail-buy-btn {
+  padding: 13px 26px;
+}
+
+.detail-add-btn:disabled,
+.detail-buy-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.detail-description h2 {
+  font-size: 1.15rem;
+  margin-bottom: 0.5rem;
+}
+
+.detail-description p {
+  color: var(--text-main);
+  line-height: 1.7;
+  white-space: pre-line;
+}
+
+/* Ulasan */
+.detail-reviews {
+  margin-top: 3rem;
+}
+
+.detail-reviews h2 {
+  font-size: 1.4rem;
+  margin-bottom: 1.25rem;
+}
+
+/* Produk serupa (rekomendasi) */
+.detail-related {
+  margin-top: 3rem;
+}
+
+.detail-related h2 {
+  font-size: 1.4rem;
+  margin-bottom: 1.25rem;
+}
+
+.review-list {
+  list-style: none;
+  display: grid;
+  gap: 1rem;
+}
+
+.review-item {
+  padding: 1.1rem 1.25rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+}
+
+.review-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.review-head time {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.review-stars {
+  color: #f59e0b;
+  letter-spacing: 1px;
+}
+
+.review-comment {
+  margin-top: 0.5rem;
+  line-height: 1.6;
+}
+
+@media (max-width: 900px) {
+  .detail-grid {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+  }
+
+  .detail-media {
+    min-height: 240px;
+  }
+
+  .detail-emoji {
+    font-size: 5rem;
+  }
+
+  .detail-info h1 {
+    font-size: 1.5rem;
+  }
+
+  .detail-price {
+    font-size: 1.6rem;
+  }
+}

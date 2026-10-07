@@ -1,0 +1,143 @@
+/* Navbar marketplace (SiteNav) */
+.site-navbar {
+  position: sticky;
+  top: 0;
+  width: 100%;
+  background: var(--glass-bg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  z-index: 1000;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.site-nav-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 70px;
+}
+
+.site-logo {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.site-logo span {
+  color: var(--secondary);
+}
+
+.site-nav-links {
+  display: flex;
+  align-items: center;
+  gap: 1.75rem;
+}
+
+.site-nav-links a {
+  font-weight: 500;
+  transition: var(--transition-fast);
+}
+
+.site-nav-links a:hover {
+  color: var(--primary);
+}
+
+/* Keranjang */
+.site-cart-link {
+  position: relative;
+  font-size: 1.3rem;
+  line-height: 1;
+}
+
+.site-cart-badge {
+  position: absolute;
+  top: -8px;
+  right: -10px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* AuthNav memakai class global ini agar tampil konsisten di semua halaman */
+.nav-user {
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.nav-logout {
+  padding: 8px 18px;
+  background: transparent;
+  color: var(--primary);
+  border: 1px solid var(--primary);
+  font-size: 0.9rem;
+}
+
+.nav-logout:hover {
+  background: var(--primary);
+  color: #fff;
+}
+
+.nav-logout:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Tombol hamburger (hanya mobile) */
+.site-nav-burger {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 1.15rem;
+  line-height: 1;
+  padding: 6px 10px;
+  cursor: pointer;
+  color: var(--text-main);
+}
+
+@media (max-width: 768px) {
+  .site-nav-burger {
+    display: inline-flex;
+  }
+
+  /* Mobile: link disembunyikan; muncul sebagai panel dropdown saat dibuka */
+  .site-nav-links {
+    display: none;
+    position: absolute;
+    top: 70px;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: 0.35rem 1rem 0.9rem;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border-color);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+  }
+
+  .site-nav-links.open {
+    display: flex;
+  }
+
+  .site-nav-links a:not(.site-cart-link) {
+    padding: 0.7rem 0.25rem;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .site-cart-link {
+    justify-content: center;
+    padding: 0.6rem 0.25rem;
+    border-bottom: 1px solid var(--border-color);
+  }
+}

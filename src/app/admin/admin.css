@@ -1,0 +1,98 @@
+/* Gaya tambahan khusus halaman admin (diimpor dari layout /admin).
+   Kelas utama dashboard memakai ../dashboard.css — file ini hanya pelengkap
+   supaya tidak mengedit CSS milik halaman lain. */
+
+/* Pill peran pengguna */
+.role-pill {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.role-admin {
+  background: #ede9fe;
+  color: #5b21b6;
+}
+
+.role-seller {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.role-buyer {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+/* Status aktif/nonaktif (akun & toko) */
+.pill-active {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.pill-inactive {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+/* Bintang rating ulasan */
+.admin-stars {
+  color: #f59e0b;
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+
+/* Komentar pada tabel ulasan (potong, tampilkan penuh saat hover) */
+.admin-comment {
+  max-width: 320px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+/* Nama + email dalam satu baris tabel */
+.admin-cell-strong {
+  display: block;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.admin-cell-sub {
+  display: block;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+/* Info halaman pada pagination (setara .pagination-info di products.css) */
+.admin-page-info {
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+
+/* Alamat/lokasi pendek di tabel */
+.admin-muted {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+/* Kontrol select/input di dalam sel tabel (mis. ubah peran) */
+.dash-table select,
+.dash-table input[type="search"] {
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-color);
+  color: var(--text-main);
+  font-family: var(--font-family);
+  font-size: 0.88rem;
+}
