@@ -154,7 +154,7 @@ async function main() {
 
   // --- 10. Password tersimpan ter-hash di database ---
   {
-    const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+    const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL, max: 4 });
     const prisma = new PrismaClient({ adapter });
     const row = await prisma.user.findUnique({ where: { email } });
     check(

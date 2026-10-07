@@ -121,7 +121,7 @@ async function main() {
     orderId = (r.json?.orderId as string) ?? "";
     check("POST /api/orders login -> 201 + orderId", r.status === 201 && Boolean(orderId), `status ${r.status}`);
 
-    const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+    const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL, max: 4 });
     const prisma = new PrismaClient({ adapter });
     const p = await prisma.product.findUnique({ where: { id: productWithStock.id } });
     check(
@@ -253,7 +253,7 @@ async function main() {
 
     // Idempoten: hapus ulasan lama (buyer, produk) agar test bisa diulang.
     {
-      const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+      const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL, max: 4 });
       const prisma = new PrismaClient({ adapter });
       const buyerUser = await prisma.user.findUnique({
         where: { email: "pembeli@mendungtirta.com" },
@@ -300,7 +300,7 @@ async function main() {
 
   // --- 9. Pembatalan + restock ---
   {
-    const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+    const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL, max: 4 });
     const prisma = new PrismaClient({ adapter });
     const before = await prisma.product.findUnique({
       where: { id: productWithStock.id },

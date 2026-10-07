@@ -28,8 +28,11 @@ async function start(name: string, port: number) {
   const db = await PGlite.create(dir);
   // maxConnections default hanya 1 — `prisma migrate dev` membutuhkan
   // beberapa koneksi bersamaan (main + shadow), jadi kita naikkan.
+  // 16: pool aplikasi (max 6) + skrip smoke (max 4 per klien) + CLI Prisma
+  // bisa bersaan; pada nilai 8 koneksi berlebih pernah ditutup di tengah
+  // pemakaian sehingga query pertama gagal "Server has closed the connection".
   const debug = process.env.PGLITE_DEBUG === "1";
-  const server = new PGLiteSocketServer({ db, port, host: "127.0.0.1", maxConnections: 8, debug });
+  const server = new PGLiteSocketServer({ db, port, host: "127.0.0.1", maxConnections: 16, debug });
   await server.start();
   console.log(`[pglite] ${name} -> 127.0.0.1:${port}`);
   return { db, server };

@@ -285,7 +285,7 @@ async function main() {
     );
 
     // Pilih toko yang punya produk AVAILABLE (via DB, akurat).
-    const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+    const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL, max: 4 });
     const prisma = new PrismaClient({ adapter });
     let targetStoreId: string | null = null;
     let baseTotal = 0;
@@ -596,7 +596,7 @@ async function main() {
 
 /** Baca stok produk langsung dari DB (untuk verifikasi restock). */
 async function prismaStock(productId: string): Promise<number | null> {
-  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL, max: 4 });
   const prisma = new PrismaClient({ adapter });
   try {
     const p = await prisma.product.findUnique({ where: { id: productId }, select: { stock: true } });
