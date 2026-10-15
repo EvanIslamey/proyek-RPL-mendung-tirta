@@ -136,57 +136,88 @@ export async function processTelegramUpdate(update: {
     message?: { chat: { id: number }; message_id: number };
   };
 }): Promise<void> {
-  // Hanya proses pesan teks untuk linking
+  // Hanya proses pesan teks
   if (!update.message?.text) return;
 
   const chatId = String(update.message.chat.id);
   const text = update.message.text.trim();
   const _userId = update.message.from.id;
+  const firstName = update.message.from.first_name || "";
 
   // Cek command /start dengan token linking
   const match = text.match(/^\/start\s+([a-f0-9]{64})$/i);
-  if (!match) return;
+  if (match) {
+    const linkToken = match[1].toLowerCase();
+    const tokenHash = await hashLinkToken(linkToken);
 
-  const linkToken = match[1].toLowerCase();
-  const tokenHash = await hashLinkToken(linkToken);
+    // Cari token linking yang valid & belum kedaluwarsa (15 menit)
+    const pending = await prisma.user.findFirst({
+      where: {
+        telegramLinkTokenHash: tokenHash,
+        telegramLinkExpiresAt: { gt: new Date() },
+      },
+      select: { id: true, name: true, telegramLinkTokenHash: true },
+    });
 
-  // Cari token linking yang valid & belum kedaluwarsa (15 menit)
-  const pending = await prisma.user.findFirst({
-    where: {
-      telegramLinkTokenHash: tokenHash,
-      telegramLinkExpiresAt: { gt: new Date() },
-    },
-    select: { id: true, name: true, telegramLinkTokenHash: true },
-  });
+    if (!pending) {
+      await sendTelegramMessage(chatId, "Token linking tidak valid atau sudah kadaluwarsa. Silakan minta token baru dari pengaturan notifikasi di website.");
+      return;
+    }
 
-  if (!pending) {
-    await sendTelegramMessage(chatId, "Token linking tidak valid atau sudah kadaluwarsa. Silakan minta token baru dari pengaturan notifikasi di website.");
+    // Cek apakah chat ID sudah dipakai user lain
+    const existingChat = await prisma.user.findFirst({
+      where: { telegramChatId: chatId, id: { not: pending.id } },
+      select: { id: true },
+    });
+    if (existingChat) {
+      await sendTelegramMessage(chatId, "Akun Telegram ini sudah terhubung ke akun Mendung Tirta yang lain. Satu akun Telegram hanya bisa terhubung ke satu akun website.");
+      return;
+    }
+
+    // Linking berhasil - update user
+    await prisma.user.update({
+      where: { id: pending.id },
+      data: {
+        telegramChatId: chatId,
+        telegramLinkedAt: new Date(),
+        telegramLinkTokenHash: null,
+        telegramLinkExpiresAt: null,
+        telegramNotify: true,
+      },
+    });
+
+    await sendTelegramMessage(chatId, `Akun Telegram berhasil dihubungkan ke **${pending.name}** (Mendung Tirta).\n\nAnda akan menerima notifikasi aktivitas penting melalui bot ini.`);
     return;
   }
 
-  // Cek apakah chat ID sudah dipakai user lain
-  const existingChat = await prisma.user.findFirst({
-    where: { telegramChatId: chatId, id: { not: pending.id } },
-    select: { id: true },
-  });
-  if (existingChat) {
-    await sendTelegramMessage(chatId, "Akun Telegram ini sudah terhubung ke akun Mendung Tirta yang lain. Satu akun Telegram hanya bisa terhubung ke satu akun website.");
+  // /start tanpa token - kirim pesan sambutan
+  if (text === "/start") {
+    const welcomeMsg = [
+      `Halo ${firstName || "Pengguna"}! 👋`,
+      "",
+      "Selamat datang di bot **Mendung Tirta Notification**.",
+      "Bot ini akan mengirimkan notifikasi aktivitas penting seperti:",
+      "• Pesanan baru & perubahan status",
+      "• Konfirmasi pembayaran",
+      "• Peringatan stok menipis",
+      "• Alert sistem (untuk admin)",
+      "",
+      "Untuk mulai menerima notifikasi, hubungkan akun Mendung Tirta Anda:",
+      "1. Buka website Mendung Tirta → login",
+      "2. Buka halaman profil / dashboard penjual",
+      "3. Klik \"Hubungkan Akun Telegram\" untuk dapatkan token",
+      "4. Kirim token ke bot ini: `/start <token>`",
+      "",
+      "Token berlaku 15 menit dan hanya bisa dipakai sekali.",
+      "",
+      "Sudah punya token? Kirim: `/start <token>`",
+    ].join("\n");
+
+    await sendTelegramMessage(chatId, welcomeMsg);
     return;
   }
 
-  // Linking berhasil - update user
-  await prisma.user.update({
-    where: { id: pending.id },
-    data: {
-      telegramChatId: chatId,
-      telegramLinkedAt: new Date(),
-      telegramLinkTokenHash: null,
-      telegramLinkExpiresAt: null,
-      telegramNotify: true,
-    },
-  });
-
-  await sendTelegramMessage(chatId, `Akun Telegram berhasil dihubungkan ke **${pending.name}** (Mendung Tirta).\n\nAnda akan menerima notifikasi aktivitas penting melalui bot ini.`);
+  // Command tidak dikenali - abaikan
 }
 
 /** Kirim notifikasi Telegram ke user (jika telegramNotify aktif & chatId ada). */

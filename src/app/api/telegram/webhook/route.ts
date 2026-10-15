@@ -18,8 +18,19 @@ export async function POST(request: NextRequest) {
       return Response.json({ message: "Invalid webhook secret." }, { status: 401 });
     }
 
-    const update = await request.json().catch(() => null);
-    if (!update) {
+    // Debug: log content-type
+    const contentType = request.headers.get("content-type");
+    console.log("[webhook] content-type:", contentType);
+
+    const text = await request.text().catch(() => "");
+    console.log("[webhook] raw body length:", text.length);
+    console.log("[webhook] raw body preview:", text.slice(0, 200));
+
+    let update;
+    try {
+      update = JSON.parse(text);
+    } catch {
+      console.error("[webhook] JSON parse failed");
       return Response.json({ message: "Invalid JSON." }, { status: 400 });
     }
 
