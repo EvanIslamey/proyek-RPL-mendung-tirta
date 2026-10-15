@@ -1,20 +1,22 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type SessionUser = { id: string; name: string; role: string };
 
 /**
- * Aksi autentikasi di navbar landing:
+ * Aksi autentikasi di navbar:
  * - Tamu  -> tombol "Masuk" (link ke /login)
- * - Login -> sapaan + tombol "Keluar"
+ * - Login -> dropdown akun dengan: Profil Saya, Informasi Akun, Pengaturan, Keluar
  */
 export function AuthNav() {
   const router = useRouter();
   const [user, setUser] = useState<SessionUser | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let alive = true;
@@ -31,6 +33,21 @@ export function AuthNav() {
     };
   }, []);
 
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    if (menuOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [menuOpen]);
+
   async function logout() {
     if (loggingOut) return;
     setLoggingOut(true);
@@ -45,15 +62,79 @@ export function AuthNav() {
     }
   }
 
+  // Determine profile route based on role
+  function getProfileHref(role: string): string {
+    switch (role) {
+      case "ADMIN":
+        return "/admin/profile";
+      case "SELLER":
+        return "/seller/profile";
+      case "BUYER":
+      default:
+        return "/buyer";
+    }
+  }
+
   if (user) {
     const firstName = user.name.split(" ")[0] || user.name;
+
     return (
-      <>
-        <span className="nav-user">Halo, {firstName}</span>
-        <button type="button" className="btn nav-logout" onClick={logout} disabled={loggingOut}>
-          {loggingOut ? "…" : "Keluar"}
+      <div className="nav-account" ref={menuRef}>
+        <button
+          type="button"
+          className="nav-account-trigger"
+          aria-label={menuOpen ? "Tutup menu akun" : "Buka menu akun"}
+          aria-expanded={menuOpen}
+          aria-haspopup="true"
+          onClick={() => setMenuOpen((o) => !o)}
+        >
+          <span className="nav-user">Halo, {firstName}</span>
+          <span className="nav-arrow" aria-hidden="true">▾</span>
         </button>
-      </>
+
+        {menuOpen && (
+          <div className="nav-account-menu" role="menu">
+            <Link
+              href={getProfileHref(user.role)}
+              className="nav-account-item"
+              role="menuitem"
+              onClick={() => setMenuOpen(false)}
+            >
+              <span className="nav-account-icon" aria-hidden="true">👤</span>
+              <span>Profil Saya</span>
+            </Link>
+            <Link
+              href={getProfileHref(user.role)}
+              className="nav-account-item"
+              role="menuitem"
+              onClick={() => setMenuOpen(false)}
+            >
+              <span className="nav-account-icon" aria-hidden="true">ℹ️</span>
+              <span>Informasi Akun</span>
+            </Link>
+            <Link
+              href="/buyer"
+              className="nav-account-item"
+              role="menuitem"
+              onClick={() => setMenuOpen(false)}
+            >
+              <span className="nav-account-icon" aria-hidden="true">⚙️</span>
+              <span>Pengaturan</span>
+            </Link>
+            <hr className="nav-account-divider" />
+            <button
+              type="button"
+              className="nav-account-item nav-logout"
+              role="menuitem"
+              onClick={logout}
+              disabled={loggingOut}
+            >
+              <span className="nav-account-icon" aria-hidden="true">🚪</span>
+              <span>{loggingOut ? "…" : "Keluar"}</span>
+            </button>
+          </div>
+        )}
+      </div>
     );
   }
 

@@ -90,6 +90,114 @@
   cursor: not-allowed;
 }
 
+/* Nav Account Dropdown */
+.nav-account {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.nav-account-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 8px 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--primary);
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.nav-account-trigger:hover {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+.nav-arrow {
+  font-size: 0.7rem;
+  transition: transform var(--transition-fast);
+}
+
+.nav-account-trigger[aria-expanded="true"] .nav-arrow {
+  transform: rotate(180deg);
+}
+
+.nav-account-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 200px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
+  padding: 0.5rem;
+  z-index: 1000;
+  animation: navMenuFadeIn 0.15s ease-out;
+}
+
+@keyframes navMenuFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.nav-account-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.7rem 1rem;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  color: var(--text-main);
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: var(--transition-fast);
+  text-decoration: none;
+}
+
+.nav-account-item:hover {
+  background: var(--bg-hover);
+  color: var(--primary);
+}
+
+.nav-account-item:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.nav-account-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.nav-account-divider {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 0.5rem 0;
+}
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+  .nav-account-menu {
+    right: -1rem;
+    min-width: 220px;
+  }
+}
+
 /* Tombol hamburger (hanya mobile) */
 .site-nav-burger {
   display: none;
