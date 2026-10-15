@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { AuthNav } from "./AuthNav";
 import { useCart } from "@/components/cart/CartContext";
+import { NotificationBell } from "@/components/notifications/NotificationBell";
 import "./site-nav.css";
 
 /**
@@ -42,6 +43,7 @@ export function SiteNav() {
             🛒
             {totalCount > 0 && <span className="site-cart-badge">{totalCount}</span>}
           </Link>
+          <NotificationBell />
           <AuthNav />
         </nav>
       </div>

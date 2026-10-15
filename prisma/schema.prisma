@@ -39,6 +39,24 @@ enum PaymentStatus {
   FAILED
 }
 
+// Jenis notifikasi in-app + email (lihat src/lib/notify.ts).
+enum NotificationKind {
+  ORDER_CREATED // konfirmasi pesanan (pembeli) / pesanan baru (penjual)
+  ORDER_STATUS_CHANGED // perubahan status pesanan
+  PAYMENT_CONFIRMED // pembayaran diterima
+  STOCK_LOW // peringatan stok menipis (penjual)
+  ACCOUNT_ALERT // peringatan akun/sistem (admin)
+}
+
+// Status pengiriman email notifikasi (retry terbatas, dedupe via dedupeKey).
+enum EmailStatus {
+  PENDING // menunggu pengiriman / antre retry
+  SENDING // sedang dikirim (klaim atomik mencegah duplikat)
+  SENT // diterima transport (smtp/http/outbox)
+  FAILED // gagal setelah percobaan maksimal
+  SKIPPED // tidak dikirim (preferensi non-esensial mati / loop-guard)
+}
+
 // MODELS
 
 model User {
@@ -49,6 +67,7 @@ model User {
   role      Role     @default(BUYER)
   address   String?
   isActive  Boolean  @default(true) // admin dapat menonaktifkan akun
+  emailAlerts Boolean @default(true) // preferensi email NON-esensial (stok menipu/sistem) — transaksional tetap terkirim
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -57,6 +76,7 @@ model User {
   orders   Order[]   // Buyer can have many orders
   reviews  Review[]  // Buyer can have many reviews
   sessions Session[] // Active login sessions
+  notifications Notification[] // Notifikasi in-app + email
 
   @@index([email])
 }
@@ -193,4 +213,32 @@ model Review {
   @@unique([buyerId, productId]) // 1 pembeli hanya 1 ulasan per produk
   @@index([productId])
   @@index([buyerId])
+}
+
+// Notifikasi in-app (lonceng) sekaligus antrean email.
+// Dibuat DALAM transaksi bisnis (ikut rollback bila transaksi gagal),
+// email dikirim SETELAH commit oleh src/lib/notify.ts — gagal email tidak
+// pernah merusak transaksi pesanan. Dedupe: unik per (userId, dedupeKey).
+model Notification {
+  id         String           @id @default(uuid())
+  userId     String
+  kind       NotificationKind
+  title      String
+  body       String
+  link       String? // tautan halaman terkait (/orders/<id>, /seller/orders, dst.)
+  readAt     DateTime? // null = belum dibaca
+  dedupeKey  String // contoh: "order:<id>:status:SHIPPED" — cegah email ganda
+  emailStatus EmailStatus     @default(PENDING)
+  emailAttempts Int           @default(0)
+  emailNextAt  DateTime? // jadwal retry berikutnya (backoff terbatas)
+  emailError  String? // pesan galat tersanitasi (tanpa kredensial)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  // Relationships
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, readAt])
+  @@index([emailStatus, emailNextAt])
 }

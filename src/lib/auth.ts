@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import { prisma } from "./prisma";
 import { ApiError } from "./validate";
 import type { Role, User } from "../../prisma/generated/client";
+import { dispatchEmails, notifyStandalone } from "./notify";
 
 export const SESSION_COOKIE = "mt_session";
 const SESSION_DAYS = 30;
@@ -141,7 +142,46 @@ export async function registerUser(input: {
           : {}),
       },
     });
-    return sanitizeUser(user);
+    const safe = sanitizeUser(user);
+
+    // Notifikasi registrasi (diluar transaksi create — user sudah commit).
+    const notifyIds: string[] = [];
+    const storeName = input.storeName?.trim() || `Toko ${input.name.trim()}`;
+
+    const welcomeId = await notifyStandalone({
+      userId: user.id,
+      kind: "ACCOUNT_ALERT",
+      title: "Selamat datang di Mendung Tirta!",
+      body:
+        role === "SELLER"
+          ? `Toko "${storeName}" sudah aktif. Tambahkan produk dan kelola pesanan dari dashboard penjual.`
+          : "Akun Anda sudah aktif. Jelajahi hasil laut segar dan perlengkapan pancing dari penjual lokal terpercaya.",
+      link: role === "SELLER" ? "/seller" : "/products",
+      dedupeKey: `account:welcome:${user.id}`,
+    });
+    if (welcomeId) notifyIds.push(welcomeId);
+
+    if (role === "SELLER") {
+      // Admin mendapat notifikasi aktivitas penting: penjual baru.
+      const admins = await prisma.user.findMany({
+        where: { role: "ADMIN", isActive: true },
+        select: { id: true },
+      });
+      for (const a of admins) {
+        const id = await notifyStandalone({
+          userId: a.id,
+          kind: "ACCOUNT_ALERT",
+          title: `Penjual baru mendaftar: ${storeName}`,
+          body: `Akun penjual "${input.name}" (${input.email}) dengan toko "${storeName}" baru saja mendaftar.`,
+          link: "/admin/stores",
+          dedupeKey: `account:seller-registered:${user.id}`,
+        });
+        if (id) notifyIds.push(id);
+      }
+    }
+
+    void dispatchEmails(notifyIds);
+    return safe;
   } catch (e) {
     if (isUniqueViolation(e)) {
       throw new ApiError(409, "Email sudah terdaftar.", { email: "Email sudah terdaftar." });

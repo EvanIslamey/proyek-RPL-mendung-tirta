@@ -122,6 +122,12 @@
   color: var(--text-muted, #6b7280);
 }
 
+/* Label sumber data aktual (Fitur A) — ringkas & boleh panjang */
+.ai-sources {
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
 .ai-products {
   list-style: none;
   margin: 0.6rem 0 0;

@@ -1,19 +1,18 @@
 import type { NextRequest } from "next/server";
 import { requireUser } from "@/lib/auth";
-import {
-  extractKeywords,
-  generateReply,
-  searchCatalog,
-  type AiChatMessage,
-} from "@/lib/ai";
+import { generateReply, type AiChatMessage } from "@/lib/ai";
+import { buildChatContext } from "@/lib/ai-context";
 import { hitRateLimit } from "@/lib/rate-limit";
 import { ApiError, assertSameOrigin, parseJsonBody } from "@/lib/validate";
 
 /**
- * POST /api/ai/chat — asisten AI belanja (wajib login, key hanya di backend).
+ * POST /api/ai/chat — asisten AI berbasis data aktual (wajib login, key hanya di backend).
+ *
+ * Alur: sesi login → rate limit → buildChatContext (query terkini, discoping
+ * peran dari sesi, bukan dari body request) → generateReply (AI / fallback).
  *
  * Body: { message: string, history?: { role, content }[] }
- * Response: { reply, products[], source: "ai" | "fallback" }
+ * Response: { reply, products[], sources[], generatedAt, source: "ai" | "fallback" }
  */
 export async function POST(request: NextRequest) {
   try {
@@ -53,11 +52,33 @@ export async function POST(request: NextRequest) {
         }));
     }
 
-    // 1. Grounding: produk nyata dari DB untuk kunci jawaban.
-    const products = await searchCatalog(extractKeywords(message));
+    // 1. Grounding: query terkini dari DB, discoping peran sesi login.
+    let context;
+    try {
+      context = await buildChatContext(user, message);
+    } catch (dbErr) {
+      // DB tidak tersedia → jawab ramah tanpa stack trace (A5).
+      console.error(
+        "[api/ai/chat] context gagal:",
+        dbErr instanceof Error ? `${dbErr.name}: ${dbErr.message}` : dbErr,
+      );
+      return Response.json({
+        reply:
+          "Maaf, layanan data sedang tidak tersedia. Silakan coba lagi beberapa saat lagi.",
+        products: [],
+        sources: [],
+        generatedAt: new Date().toISOString(),
+        source: "fallback",
+      });
+    }
 
-    // 2. Balasan (AI bila key ada, fallback bila tidak).
-    const result = await generateReply({ message, history, products });
+    // 2. Balasan (AI bila key ada, fallback berbasis data bila tidak).
+    const result = await generateReply({
+      message,
+      history,
+      products: context.products,
+      sections: context.sections,
+    });
 
     return Response.json(result);
   } catch (e) {

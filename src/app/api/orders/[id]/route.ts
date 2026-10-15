@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { requireRole, requireUser } from "@/lib/auth";
-import { cancelOwnOrder, cancelOrderAs } from "@/lib/orders";
+import { cancelOwnOrder, cancelOrderAs, setOrderStatus } from "@/lib/orders";
 import { prisma } from "@/lib/prisma";
 import { ApiError, assertSameOrigin } from "@/lib/validate";
 
@@ -149,7 +149,8 @@ export async function PATCH(
       if (newStatus === "CANCELLED") {
         await cancelOrderAs(user.role === "ADMIN" ? "ADMIN" : "SELLER", id, store?.id);
       } else {
-        await prisma.order.update({ where: { id }, data: { status: newStatus as never } });
+        // Service menangani update + notifikasi pembeli (email setelah commit).
+        await setOrderStatus(id, newStatus);
       }
       return Response.json({ message: `Status diperbarui ke ${newStatus}.` });
     }

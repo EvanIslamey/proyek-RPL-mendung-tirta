@@ -20,6 +20,7 @@ type ChatMessage = {
   role: "user" | "assistant";
   text: string;
   products?: Product[];
+  sources?: { label: string; asOf: string }[];
   source?: "ai" | "fallback";
   error?: boolean;
 };
@@ -80,6 +81,7 @@ export function AIWidget() {
       const data: {
         reply?: string;
         products?: Product[];
+        sources?: { label: string; asOf: string }[];
         source?: "ai" | "fallback";
         message?: string;
       } = await res.json().catch(() => ({}));
@@ -103,6 +105,7 @@ export function AIWidget() {
           role: "assistant",
           text: data.reply ?? "Maaf, saya belum bisa menjawab.",
           products: data.products,
+          sources: data.sources,
           source: data.source,
         },
       ]);
@@ -128,7 +131,7 @@ export function AIWidget() {
           <header className="ai-panel-head">
             <div>
               <strong>Asisten Mendung Tirta</strong>
-              <span className="ai-status">Tanya produk, stok & harga</span>
+              <span className="ai-status">Tanya produk, stok, pesanan & statistik</span>
             </div>
             <button type="button" aria-label="Tutup asisten" onClick={() => setOpen(false)}>
               ×
@@ -140,8 +143,19 @@ export function AIWidget() {
               <div key={m.id} className={`ai-msg ai-msg-${m.role}${m.error ? " ai-msg-error" : ""}`}>
                 <p className="ai-msg-text">{m.text}</p>
 
-                {m.source === "fallback" && (m.products?.length ?? 0) > 0 && (
-                  <span className="ai-note">Mode katalog — jawaban dari pencarian database.</span>
+                {m.source === "fallback" && (
+                  <span className="ai-note">Mode katalog — jawaban dari data database terkini (tanpa AI).</span>
+                )}
+
+                {m.role === "assistant" && !!m.sources?.length && (
+                  <span className="ai-note ai-sources">
+                    Sumber: {m.sources.map((s) => s.label).join(" • ")}
+                    {" • diperbarui "}
+                    {new Date(m.sources[m.sources.length - 1].asOf).toLocaleTimeString("id-ID", {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </span>
                 )}
 
                 {m.products && m.products.length > 0 && (

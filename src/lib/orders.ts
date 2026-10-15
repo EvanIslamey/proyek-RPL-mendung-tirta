@@ -2,6 +2,10 @@ import { Prisma } from "../../prisma/generated/client";
 import { prisma } from "./prisma";
 import { ApiError } from "./validate";
 import type { SafeUser } from "./auth";
+import { dispatchEmails, notifyInTx } from "./notify";
+import { stockAlertThreshold } from "./ai-context";
+
+const rupiah = (n: number): string => `Rp${Math.round(n).toLocaleString("id-ID")}`;
 
 /** Transisi status order yang sah (untuk penjual/admin). */
 export const ORDER_TRANSITIONS: Record<string, string[]> = {
@@ -71,6 +75,11 @@ export async function createOrder(input: {
   }
 
   try {
+    const notifyIds: string[] = [];
+    const lowStockHits: { productId: string; name: string; stock: number; storeUserId: string }[] = [];
+    const qtyNames = new Map<string, { name: string; quantity: number }>();
+    const threshold = stockAlertThreshold();
+
     const orderId = await prisma.$transaction(async (tx) => {
       let total = new Prisma.Decimal(0);
       const validItems: { productId: string; quantity: number; price: Prisma.Decimal }[] = [];
@@ -78,7 +87,14 @@ export async function createOrder(input: {
       for (const [productId, quantity] of qtyByProduct) {
         const product = await tx.product.findUnique({
           where: { id: productId },
-          select: { id: true, price: true, stock: true, status: true, name: true },
+          select: {
+            id: true,
+            price: true,
+            stock: true,
+            status: true,
+            name: true,
+            store: { select: { userId: true, storeName: true } },
+          },
         });
 
         if (!product || product.status === "HIDDEN") {
@@ -105,6 +121,17 @@ export async function createOrder(input: {
           });
         }
 
+        // Stok menyentuh/masuk ambang menipis? → catat untuk notifikasi seller.
+        const newStock = product.stock - quantity;
+        if (newStock >= 0 && newStock <= threshold) {
+          lowStockHits.push({
+            productId,
+            name: product.name,
+            stock: newStock,
+            storeUserId: product.store.userId,
+          });
+        }
+
         // Tandai OUT_OF_STOCK bila stok habis.
         if (product.stock - quantity <= 0) {
           await tx.product.update({
@@ -116,6 +143,7 @@ export async function createOrder(input: {
         const price = product.price;
         total = total.plus(price.times(quantity));
         validItems.push({ productId, quantity, price });
+        qtyNames.set(productId, { name: product.name, quantity });
       }
 
       const order = await tx.order.create({
@@ -135,11 +163,91 @@ export async function createOrder(input: {
             create: { amount: total, method: "dummy", status: "PENDING" },
           },
         },
-        select: { id: true },
+        select: { id: true, total: true },
       });
+
+      /* --- Notifikasi dibuat DALAM transaksi (ikut rollback bila gagal) --- */
+      const push = async (p: Promise<string | null>) => {
+        const id = await p;
+        if (id) notifyIds.push(id);
+      };
+      const shortId = order.id.slice(0, 8);
+      const itemLines = validItems.map((i) => {
+        const p = qtyNames.get(i.productId);
+        return `${p?.name ?? "Produk"} x${p?.quantity ?? i.quantity}`;
+      });
+
+      // 1. Pembeli: konfirmasi pesanan.
+      await push(
+        notifyInTx(tx, {
+          userId: buyer.id,
+          kind: "ORDER_CREATED",
+          title: `Pesanan #${shortId} berhasil dibuat`,
+          body: [
+            `Total: ${rupiah(Number(order.total))} — status: PENDING (menunggu pembayaran).`,
+            "Item:",
+            ...itemLines,
+            `Dikirim ke: ${shippingAddress}`,
+          ].join("\n"),
+          link: `/orders/${order.id}`,
+          dedupeKey: `order:${order.id}:created`,
+        }),
+      );
+
+      // 2. Penjual terkait: pesanan baru masuk (per toko).
+      const orderItems = await tx.orderItem.findMany({
+        where: { orderId: order.id },
+        include: {
+          product: { select: { name: true, store: { select: { userId: true, storeName: true } } } },
+        },
+      });
+      const bySeller = new Map<string, { storeName: string; lines: string[] }>();
+      for (const it of orderItems) {
+        const g = bySeller.get(it.product.store.userId) ?? {
+          storeName: it.product.store.storeName,
+          lines: [],
+        };
+        g.lines.push(`${it.product.name} x${it.quantity}`);
+        bySeller.set(it.product.store.userId, g);
+      }
+      for (const [sellerId, g] of bySeller) {
+        await push(
+          notifyInTx(tx, {
+            userId: sellerId,
+            kind: "ORDER_CREATED",
+            title: `Pesanan baru berisi produk Anda (#${shortId})`,
+            body: [
+              `${buyer.name} memesan produk toko "${g.storeName}":`,
+              ...g.lines,
+              `Nilai total pesanan: ${rupiah(Number(order.total))}`,
+              "Status: PENDING (menunggu pembayaran).",
+            ].join("\n"),
+            link: "/seller/orders",
+            dedupeKey: `order:${order.id}:seller:${sellerId}`,
+          }),
+        );
+      }
+
+      // 3. Stok menipis (email NON-esensial → hormati preferensi penjual).
+      for (const hit of lowStockHits) {
+        await push(
+          notifyInTx(tx, {
+            userId: hit.storeUserId,
+            kind: "STOCK_LOW",
+            title: `Stok "${hit.name}" menipis (tersisa ${hit.stock})`,
+            body: `Setelah pesanan baru, stok "${hit.name}" tinggal ${hit.stock} (ambang peringatan: ${threshold}). Segera restok agar tidak kehabisan.`,
+            link: "/seller/products",
+            dedupeKey: `stock:${hit.productId}:${hit.stock}`,
+            essential: false,
+          }),
+        );
+      }
 
       return order.id;
     });
+
+    // Transaksi COMMIT → kirim email (kegagalan di sini tidak membatalkan pesanan).
+    void dispatchEmails(notifyIds);
 
     return { orderId };
   } catch (e) {
@@ -152,12 +260,22 @@ export async function createOrder(input: {
 /**
  * Bayar order (MVP: dummy). Hanya order PENDING milik pembeli yang bisa dibayar.
  * Membayar mengubah payment -> PAID dan order -> PROCESSING.
+ * Notifikasi: pembeli (pembayaran diterima) + penjual (pesanan menunggu tindakan).
  */
 export async function payOrder(user: SafeUser, orderId: string): Promise<void> {
+  const notifyIds: string[] = [];
+
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findUnique({
       where: { id: orderId },
-      include: { payment: true },
+      include: {
+        payment: true,
+        orderItems: {
+          include: {
+            product: { select: { name: true, store: { select: { userId: true, storeName: true } } } },
+          },
+        },
+      },
     });
 
     if (!order || order.buyerId !== user.id) {
@@ -175,7 +293,57 @@ export async function payOrder(user: SafeUser, orderId: string): Promise<void> {
       where: { id: orderId },
       data: { status: "PROCESSING" },
     });
+
+    /* Notifikasi DALAM transaksi — dispatch setelah commit. */
+    const push = async (p: Promise<string | null>) => {
+      const id = await p;
+      if (id) notifyIds.push(id);
+    };
+    const shortId = order.id.slice(0, 8);
+
+    await push(
+      notifyInTx(tx, {
+        userId: order.buyerId,
+        kind: "PAYMENT_CONFIRMED",
+        title: `Pembayaran pesanan #${shortId} diterima`,
+        body: [
+          `Pembayaran ${rupiah(Number(order.payment?.amount ?? order.total))} untuk pesanan #${shortId} telah diterima.`,
+          "Status pesanan kini PROCESSING (diproses penjual).",
+        ].join("\n"),
+        link: `/orders/${order.id}`,
+        dedupeKey: `order:${order.id}:paid`,
+      }),
+    );
+
+    // Penjual terkait: pesanan menunggu tindakan (proses/kirim).
+    const bySeller = new Map<string, { storeName: string; lines: string[] }>();
+    for (const it of order.orderItems) {
+      const g = bySeller.get(it.product.store.userId) ?? {
+        storeName: it.product.store.storeName,
+        lines: [],
+      };
+      g.lines.push(`${it.product.name} x${it.quantity}`);
+      bySeller.set(it.product.store.userId, g);
+    }
+    for (const [sellerId, g] of bySeller) {
+      await push(
+        notifyInTx(tx, {
+          userId: sellerId,
+          kind: "ORDER_STATUS_CHANGED",
+          title: `Pesanan #${shortId} sudah dibayar — menunggu diproses`,
+          body: [
+            `Pembayaran diterima untuk pesanan berisi produk "${g.storeName}":`,
+            ...g.lines,
+            "Status kini PROCESSING — silakan proses pesanan.",
+          ].join("\n"),
+          link: "/seller/orders",
+          dedupeKey: `order:${order.id}:status:PROCESSING:seller:${sellerId}`,
+        }),
+      );
+    }
   });
+
+  void dispatchEmails(notifyIds);
 }
 
 /** Batalkan order oleh pembeli (hanya status PENDING) + kembalikan stok. */
@@ -216,10 +384,19 @@ async function cancelOrderCore(
   allowedStatuses: string[],
   restock: boolean,
 ): Promise<void> {
+  const notifyIds: string[] = [];
+
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findUnique({
       where: { id: orderId },
-      include: { orderItems: true, payment: true },
+      include: {
+        payment: true,
+        orderItems: {
+          include: {
+            product: { select: { name: true, store: { select: { userId: true, storeName: true } } } },
+          },
+        },
+      },
     });
     if (!order) throw new ApiError(404, "Pesanan tidak ditemukan.");
     if (!allowedStatuses.includes(order.status)) {
@@ -249,5 +426,87 @@ async function cancelOrderCore(
         data: { status: "FAILED" },
       });
     }
+
+    /* Notifikasi pembatalan DALAM transaksi. */
+    const push = async (p: Promise<string | null>) => {
+      const id = await p;
+      if (id) notifyIds.push(id);
+    };
+    const shortId = order.id.slice(0, 8);
+
+    await push(
+      notifyInTx(tx, {
+        userId: order.buyerId,
+        kind: "ORDER_STATUS_CHANGED",
+        title: `Pesanan #${shortId} dibatalkan`,
+        body: `Pesanan #${shortId} berstatus CANCELLED.${restock ? " Stok produk telah dikembalikan." : ""}`,
+        link: `/orders/${order.id}`,
+        dedupeKey: `order:${order.id}:status:CANCELLED`,
+      }),
+    );
+
+    const sellerIds = new Set(order.orderItems.map((i) => i.product.store.userId));
+    for (const sellerId of sellerIds) {
+      await push(
+        notifyInTx(tx, {
+          userId: sellerId,
+          kind: "ORDER_STATUS_CHANGED",
+          title: `Pesanan #${shortId} dibatalkan`,
+          body: `Pesanan berisi produk Anda (#${shortId}) kini CANCELLED.${restock ? " Stok telah dikembalikan." : ""}`,
+          link: "/seller/orders",
+          dedupeKey: `order:${order.id}:status:CANCELLED:seller:${sellerId}`,
+        }),
+      );
+    }
   });
+
+  void dispatchEmails(notifyIds);
+}
+
+/** Label status Indonesia untuk isi email/notifikasi. */
+const STATUS_LABEL_ID: Record<string, string> = {
+  PENDING: "menunggu pembayaran",
+  PROCESSING: "sedang diproses penjual",
+  SHIPPED: "sudah dikirim",
+  READY_FOR_PICKUP: "siap diambil di toko",
+  COMPLETED: "selesai",
+  CANCELLED: "dibatalkan",
+};
+
+/**
+ * Ubah status pesanan non-pembatalan (transisi SAH sudah divalidasi pemanggil
+ * lewat ORDER_TRANSITIONS + cek kepemilikan di route). Notifikasi pembeli
+ * dibuat dalam transaksi yang sama; email dikirim setelah commit.
+ */
+export async function setOrderStatus(orderId: string, newStatus: string): Promise<void> {
+  const notifyIds: string[] = [];
+
+  await prisma.$transaction(async (tx) => {
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      select: { id: true, buyerId: true, status: true },
+    });
+    if (!order) throw new ApiError(404, "Pesanan tidak ditemukan.");
+    if (order.status === newStatus) {
+      throw new ApiError(409, "Status pesanan sama dengan status saat ini.");
+    }
+
+    await tx.order.update({ where: { id: orderId }, data: { status: newStatus as never } });
+
+    const shortId = order.id.slice(0, 8);
+    const id = await notifyInTx(tx, {
+      userId: order.buyerId,
+      kind: "ORDER_STATUS_CHANGED",
+      title: `Pesanan #${shortId} kini ${STATUS_LABEL_ID[newStatus] ?? newStatus}`,
+      body: [
+        `Status pesanan #${shortId} diperbarui: ${order.status} → ${newStatus}`,
+        `Artinya: ${STATUS_LABEL_ID[newStatus] ?? newStatus}.`,
+      ].join("\n"),
+      link: `/orders/${order.id}`,
+      dedupeKey: `order:${order.id}:status:${newStatus}`,
+    });
+    if (id) notifyIds.push(id);
+  });
+
+  void dispatchEmails(notifyIds);
 }
