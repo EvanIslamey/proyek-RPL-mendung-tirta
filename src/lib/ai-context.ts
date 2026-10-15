@@ -24,7 +24,7 @@ import type { SafeUser } from "./auth";
 export type ContextScope = "publik" | "milik-sendiri" | "toko-sendiri" | "admin";
 
 export type ContextSection = {
-  key: "orders" | "sales" | "stats" | "lowstock" | "store";
+  key: "orders" | "sales" | "stats" | "lowstock" | "store" | "account";
   label: string;
   scope: ContextScope;
   asOf: string; // ISO waktu pengambilan (untuk sumber/jawaban "diperbarui saat…")
@@ -61,10 +61,10 @@ const rupiah = (n: number): string => `Rp${Math.round(n).toLocaleString("id-ID")
  * Hanya menentukan FETCHER mana yang boleh dijalankan; otorisasi tetap
  * diputuskan per peran di `buildChatContext`.
  */
-export function detectIntents(message: string): Set<"order" | "sales" | "stats" | "lowstock" | "store"> {
+export function detectIntents(message: string): Set<"order" | "sales" | "stats" | "lowstock" | "store" | "account"> {
   const m = message.toLowerCase();
   const has = (...words: string[]) => words.some((w) => m.includes(w));
-  const intents = new Set<"order" | "sales" | "stats" | "lowstock" | "store">();
+  const intents = new Set<"order" | "sales" | "stats" | "lowstock" | "store" | "account">();
 
   if (has("pesanan", "pembelian", "order", "checkout", "bayar", "dibayar", "dikirim")) {
     intents.add("order");
@@ -80,6 +80,20 @@ export function detectIntents(message: string): Set<"order" | "sales" | "stats" 
   }
   if (has("toko", "penjual", "seller", "penjualnya", "tokonya", "siapa yang jual")) {
     intents.add("store");
+  }
+  // Account intent: gunakan kata kunci individual (bukan frasa penuh) agar cocok
+  // meskipun ada kata di antaranya.
+  if (
+    has(
+      "siapa saya", "akun saya", "profil saya", "informasi akun", "nama saya", "email saya",
+      "login sebagai", "kapan daftar", "bergabung sejak", "role saya", "peran saya",
+      "ubah profil", "ganti profil", "edit profil", "akun apa", "profil apa",
+      "daftar kapan", "sejak kapan", "peran apa", "role apa",
+      // kata kunci individual untuk menangkap variasi
+      "daftar", "sejak", "peran", "role", "akun", "profil", "email", "password", "sandi", "kata sandi"
+    )
+  ) {
+    intents.add("account");
   }
   return intents;
 }
@@ -381,6 +395,59 @@ async function fetchStores(keywords: string[]): Promise<ContextSection | null> {
   };
 }
 
+/** Informasi akun pengguna yang sedang login — aman, hanya milik sendiri. */
+async function fetchAccount(user: SafeUser): Promise<ContextSection | null> {
+  const dbUser = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      role: true,
+      address: true,
+      isActive: true,
+      createdAt: true,
+      store: { select: { storeName: true, description: true, location: true, isActive: true } },
+      _count: { select: { orders: true, reviews: true } },
+    },
+  });
+  if (!dbUser) return null;
+
+  const roleLabel: Record<string, string> = {
+    BUYER: "Pembeli",
+    SELLER: "Penjual",
+    ADMIN: "Admin",
+  };
+
+  const lines = [
+    `Nama: ${dbUser.name}`,
+    `Email: ${dbUser.email}`,
+    `Peran: ${roleLabel[dbUser.role] ?? dbUser.role}`,
+    `Alamat: ${dbUser.address ?? "(belum diisi)"}`,
+    `Status akun: ${dbUser.isActive ? "Aktif" : "Nonaktif"}`,
+    `Bergabung sejak: ${fmtDate(dbUser.createdAt)}`,
+    `Total pesanan: ${dbUser._count.orders}`,
+    `Total ulasan: ${dbUser._count.reviews}`,
+  ];
+
+  if (dbUser.role === "SELLER" && dbUser.store) {
+    lines.push(
+      `Toko: ${dbUser.store.storeName}`,
+      `Status toko: ${dbUser.store.isActive ? "Aktif" : "Nonaktif"}`,
+      dbUser.store.location ? `Lokasi toko: ${dbUser.store.location}` : "",
+      dbUser.store.description ? `Deskripsi: ${dbUser.store.description.slice(0, 200)}` : "",
+    );
+  }
+
+  return {
+    key: "account",
+    label: "Informasi akun Anda",
+    scope: "milik-sendiri",
+    asOf: new Date().toISOString(),
+    text: lines.filter(Boolean).join("\n"),
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /* Orkestrasi                                                          */
 /* ------------------------------------------------------------------ */
@@ -403,6 +470,7 @@ export async function buildChatContext(user: SafeUser, message: string): Promise
   if (intents.has("stats")) jobs.push(fetchStats(user));
   if (intents.has("lowstock")) jobs.push(fetchLowStock(user, message));
   if (intents.has("store")) jobs.push(fetchStores(keywords));
+  if (intents.has("account")) jobs.push(fetchAccount(user));
 
   const sections = (await Promise.all(jobs)).filter((s): s is ContextSection => s !== null);
 
