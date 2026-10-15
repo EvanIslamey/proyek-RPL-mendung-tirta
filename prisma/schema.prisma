@@ -68,6 +68,11 @@ model User {
   address   String?
   isActive  Boolean  @default(true) // admin dapat menonaktifkan akun
   emailAlerts Boolean @default(true) // preferensi email NON-esensial (stok menipu/sistem) — transaksional tetap terkirim
+  telegramChatId String? @unique // Chat ID Telegram yang sudah diverifikasi
+  telegramLinkedAt DateTime? // Waktu linking akun Telegram
+  telegramNotify Boolean @default(true) // Preferensi notifikasi Telegram
+  telegramLinkTokenHash String? // Hash token linking (SHA-256)
+  telegramLinkExpiresAt DateTime? // Kadaluwarsa token linking
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -79,6 +84,7 @@ model User {
   notifications Notification[] // Notifikasi in-app + email
 
   @@index([email])
+  @@index([telegramChatId])
 }
 
 model Session {

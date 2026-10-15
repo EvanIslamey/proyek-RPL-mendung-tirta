@@ -18,6 +18,9 @@ export type SafeUser = {
   role: Role;
   address: string | null;
   createdAt: Date;
+  telegramChatId: string | null;
+  telegramNotify: boolean;
+  telegramLinkedAt: Date | null;
 };
 
 export function sanitizeUser(user: User): SafeUser {
@@ -28,6 +31,9 @@ export function sanitizeUser(user: User): SafeUser {
     role: user.role,
     address: user.address,
     createdAt: user.createdAt,
+    telegramChatId: user.telegramChatId,
+    telegramNotify: user.telegramNotify,
+    telegramLinkedAt: user.telegramLinkedAt,
   };
 }
 

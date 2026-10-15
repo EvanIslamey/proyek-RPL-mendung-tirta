@@ -1,11 +1,11 @@
 /**
- * Sistem notifikasi in-app + email (Fitur B & C).
+ * Sistem notifikasi in-app + email + Telegram (Fitur B, C & Telegram).
  *
  * Alur & jaminan:
  * 1. `notifyInTx(tx, ...)` dipanggil DALAM transaksi bisnis → baris notifikasi
- *    ikut rollback bila transaksi gagal (tidak ada notifikasi/email palsu).
- * 2. SETELAH commit, pemanggil memanggil `dispatchEmails(ids)` → email dikirim
- *    di luar transaksi. Gagal email TIDAK PERNAH membatalkan pesanan.
+ *    ikut rollback bila transaksi gagal (tidak ada notifikasi/email/Telegram palsu).
+ * 2. SETELAH commit, pemanggil memanggil `dispatchEmails(ids)` → email & Telegram
+ *    dikirim di luar transaksi. Gagal email/Telegram TIDAK PERNAH membatalkan pesanan.
  * 3. Anti-duplikat ganda lapis:
  *    - unik (userId, dedupeKey) saat insert → event sama tak menduplikasi baris;
  *    - klaim atomik PENDING/FAILED → SENDING → hanya satu proses mengirim.
@@ -14,12 +14,14 @@
  *    otomatis via timer dalam proses, atau cron luar — lihat README).
  * 5. Email non-esensial (STOCK_LOW) menghormati preferensi `User.emailAlerts`;
  *    email transaksional (pesanan/pembayaran) selalu terkirim.
- * 6. Kegagalan final memicu notifikasi in-app ke admin (email SKIPPED —
+ * 6. Telegram menghormati `User.telegramNotify` dan `User.telegramChatId`.
+ * 7. Kegagalan final memicu notifikasi in-app ke admin (email SKIPPED —
  *    loop-guard, tanpa mengirim email lagi).
  */
 
 import { prisma } from "./prisma";
 import { sendMail, renderEmail } from "./mail";
+import { sendTelegramNotification, sendTelegramToAdmins } from "./telegram";
 import type { NotificationKind, Prisma } from "../../prisma/generated/client";
 
 export type NotifyInput = {
@@ -149,7 +151,7 @@ async function claim(id: string): Promise<NotificationRow | null> {
   });
 }
 
-/** Beri tahu admin (in-app saja, tanpa email) bahwa email notifikasi gagal. */
+/** Beri tahu admin (in-app + Telegram) bahwa email notifikasi gagal. */
 async function alertAdminsEmailFailed(failed: NotificationRow, error: string): Promise<void> {
   const admins = await prisma.user.findMany({
     where: { role: "ADMIN", isActive: true },
@@ -177,6 +179,12 @@ async function alertAdminsEmailFailed(failed: NotificationRow, error: string): P
       }
     }
   }
+
+  // Kirim Telegram ke admin (non-blocking)
+  await sendTelegramToAdmins(
+    "⚠️ Email Notifikasi Gagal",
+    `Email notifikasi (${failed.kind}) ke ${masked} gagal setelah ${EMAIL_MAX_ATTEMPTS} percobaan.\nDetail: ${error}`,
+  ).catch(() => undefined);
 }
 
 /** Kirim satu baris (sudah diklaim) → perbarui status SENT/FAILED. */
@@ -226,7 +234,7 @@ async function sendOne(row: NotificationRow): Promise<void> {
 }
 
 /**
- * Kirim email untuk daftar notifikasi hasil commit. Tidak PERNAH melempar —
+ * Kirim email & Telegram untuk daftar notifikasi hasil commit. Tidak PERNAH melempar —
  * kegagalan dicatat per baris. Aman dipanggil `void dispatchEmails(ids)`.
  */
 export async function dispatchEmails(ids: string[]): Promise<void> {
@@ -237,6 +245,10 @@ export async function dispatchEmails(ids: string[]): Promise<void> {
       const row = await claim(id);
       if (!row) continue;
       await sendOne(row);
+      // Kirim Telegram secara terpisah (gagal tidak block email)
+      await sendTelegramNotification(row.user.id, row.title, row.body, row.link ?? undefined).catch((e) => {
+        console.error(`[telegram] GAGAL id=${row.id}:`, sanitizeEmailError(e));
+      });
     }
   } catch (e) {
     console.error("[notify] dispatch error:", sanitizeEmailError(e));
