@@ -190,24 +190,44 @@ const SYSTEM_PROMPT = [
   "11. Pertanyaan 'apa saja produk yang tersedia' dijawab dengan daftar produk dari KATALOG (nama, harga, stok, toko) beserta arahan membuka /products untuk katalog lengkap.",
   "12. Saat menyebut kondisi katalog, patuhi section 'Ringkasan katalog': hanya boleh menyatakan 'katalog kosong' bila Total produk non-hidden = 0. Bila ada produk tetapi tersedia = 0, katakan produk ditemukan namun semua stoknya habis (rujuk daftar pada section 'Produk dengan stok habis'). Bila tersedia > 0, jangan pernah menyatakan katalog kosong.",
   "13. Bila pertanyaan tentang produk habis/out of stock, jawab dari section 'Produk dengan stok habis' (KATALOG berisi produk yang masih tersedia — jangan tertukar).",
-  "14. Bila pertanyaan lanjutan tidak jelas (mis. 'apakah masih ada?' tanpa konteks produk), gunakan produk/balasan sebelumnya bila masih jelas dari riwayat; bila tidak jelas, tanyakan produk mana yang dimaksud.",
+  "14. Pertanyaan lanjutan (mis. 'berapa harganya?', 'stoknya berapa?', 'apakah masih ada?', 'ada ukuran lain?') merujuk ke produk pada PRODUK DARI KONTEKS PERCAKAPAN SEBELUMNYA bila ada dan pertanyaannya jelas merujuk ke situ; bila referensi tidak jelas atau topik berpindah, jangan memaksa — tanyakan produk mana yang dimaksud.",
+  "15. Bila pertanyaan menyebut varian/ukuran/detail yang tidak ada dalam data (mis. ukuran produk), katakan informasi itu belum tersedia di data — jangan mengarang.",
+  "16. Pertanyaan 'cara mengubah profil/password' dijawab dari panduan pada DATA KONTEKS akun (menu akun → Informasi Diri) — sebutkan langkah navigasi singkat.",
+  "17. Pertanyaan layanan/tentang kami/panduan dijawab dari section 'Informasi layanan & panduan Mendung Tirta'.",
+  "18. 'berapa jumlah penjual/pembeli': ADMIN jawab dari section statistik; non-admin jawab dari section 'Jangkauan marketplace' (toko aktif = data publik; jumlah pembeli = data internal admin).",
 ].join("\n");
 
 /** Format section konteks per-peran + katalog untuk prompt model. */
-function contextForPrompt(sections: ContextSection[], products: AiProduct[]): string {
+function contextForPrompt(
+  sections: ContextSection[],
+  products: AiProduct[],
+  contextProducts: AiProduct[],
+): string {
   const parts = sections.map(
     (s) =>
       `DATA KONTEKS — ${s.label} (scope: ${s.scope}; diambil ${new Date(s.asOf).toLocaleString("id-ID")}):\n${s.text}`,
   );
+  if (contextProducts.length > 0) {
+    parts.push(
+      "PRODUK DARI KONTEKS PERCAKAPAN SEBELUMNYA (divalidasi ulang dari database saat ini — harga/stok terkini):\n" +
+        catalogForPrompt(contextProducts),
+    );
+  }
   parts.push(`KATALOG:\n${catalogForPrompt(products)}`);
   return parts.join("\n\n");
 }
 
-function buildSources(sections: ContextSection[], generatedAt: string) {
-  return [
-    ...sections.map((s) => ({ label: s.label, asOf: s.asOf })),
-    { label: "Katalog produk Mendung Tirta", asOf: generatedAt },
-  ];
+/**
+ * Sumber jawaban — hanya label yang benar-benar dikirim/dipakai:
+ * section konteks yang terpilih + katalog HANYA bila ada produk yang
+ * disertakan (jangan menempel "Katalog produk" pada jawaban akun/statistik).
+ */
+function buildSources(sections: ContextSection[], products: AiProduct[], generatedAt: string) {
+  const sources = sections.map((s) => ({ label: s.label, asOf: s.asOf }));
+  if (products.length > 0) {
+    sources.push({ label: "Katalog produk Mendung Tirta", asOf: generatedAt });
+  }
+  return sources;
 }
 
 /**
@@ -218,18 +238,23 @@ function fallbackResult(opts: {
   message: string;
   products: AiProduct[];
   sections: ContextSection[];
+  contextProducts?: AiProduct[];
   generatedAt: string;
 }): AiChatResult {
-  const sources = buildSources(opts.sections, opts.generatedAt);
+  const allProducts = [
+    ...opts.products,
+    ...(opts.contextProducts ?? []).filter((c) => !opts.products.some((p) => p.id === c.id)),
+  ];
+  const sources = buildSources(opts.sections, allProducts, opts.generatedAt);
 
   if (opts.sections.length > 0) {
     const body = opts.sections.map((s) => `${s.label}:\n${s.text}`).join("\n\n");
     // Sertakan daftar produk bila ada — agar mode tanpa AI tetap bisa
     // menjawab "apa saja produk yang tersedia" dengan daftar nyata.
     const productList =
-      opts.products.length > 0
+      allProducts.length > 0
         ? "\n\nProduk dari katalog:\n" +
-          opts.products
+          allProducts
             .slice(0, 5)
             .map(
               (p, i) =>
@@ -243,14 +268,14 @@ function fallbackResult(opts: {
         "Berikut data terkini dari aplikasi (mode katalog — tanpa model AI):\n\n" +
         body.slice(0, 1600) +
         productList.slice(0, 600),
-      products: opts.products.slice(0, 5),
+      products: allProducts.slice(0, 5),
       sources,
       generatedAt: opts.generatedAt,
       source: "fallback",
     };
   }
 
-  if (opts.products.length === 0) {
+  if (allProducts.length === 0) {
     return {
       reply:
         `Maaf, saya belum menemukan data yang cocok untuk "${opts.message.slice(0, 80)}". ` +
@@ -263,7 +288,7 @@ function fallbackResult(opts: {
     };
   }
 
-  const lines = opts.products
+  const lines = allProducts
     .slice(0, 5)
     .map(
       (p, i) =>
@@ -276,7 +301,7 @@ function fallbackResult(opts: {
       "Berikut produk yang mungkin cocok dari katalog kami:\n\n" +
       lines +
       "\n\nBuka halaman produk untuk detail lengkap dan ulasan pembeli.",
-    products: opts.products.slice(0, 5),
+    products: allProducts.slice(0, 5),
     sources,
     generatedAt: opts.generatedAt,
     source: "fallback",
@@ -292,9 +317,18 @@ export async function generateReply(opts: {
   history: AiChatMessage[];
   products: AiProduct[];
   sections: ContextSection[];
+  /** Produk riwayat percakapan (divalidasi ulang dari DB oleh pemanggil). */
+  contextProducts?: AiProduct[];
 }): Promise<AiChatResult> {
   const generatedAt = new Date().toISOString();
+  const contextProducts = opts.contextProducts ?? [];
   const fallback = () => fallbackResult({ ...opts, generatedAt });
+
+  // Union untuk validasi marker [produk:id] & label sumber katalog.
+  const allProducts = [
+    ...opts.products,
+    ...contextProducts.filter((c) => !opts.products.some((p) => p.id === c.id)),
+  ];
 
   const apiKey = process.env.AI_API_KEY?.trim();
   if (!apiKey) return fallback();
@@ -306,7 +340,7 @@ export async function generateReply(opts: {
     { role: "system" as const, content: SYSTEM_PROMPT },
     {
       role: "system" as const,
-      content: `DATA DARI DATABASE:\n${contextForPrompt(opts.sections, opts.products)}`,
+      content: `DATA DARI DATABASE:\n${contextForPrompt(opts.sections, opts.products, contextProducts)}`,
     },
     ...opts.history.slice(-8),
     { role: "user" as const, content: opts.message },
@@ -327,7 +361,7 @@ export async function generateReply(opts: {
     if (!content) throw new Error("provider mengembalikan jawaban kosong");
 
     // Validasi id produk terhadap grounding — buang karangan model.
-    const allowed = new Map(opts.products.map((p) => [p.id, p]));
+    const allowed = new Map(allProducts.map((p) => [p.id, p]));
     const mentioned: string[] = [];
     const reply = content
       .replace(/\[produk:([^\]]+)\]/g, (_m, id: string) => {
@@ -345,7 +379,7 @@ export async function generateReply(opts: {
     return {
       reply,
       products: mentioned.map((id) => allowed.get(id)!).slice(0, 5),
-      sources: buildSources(opts.sections, generatedAt),
+      sources: buildSources(opts.sections, allProducts, generatedAt),
       generatedAt,
       source: "ai",
     };

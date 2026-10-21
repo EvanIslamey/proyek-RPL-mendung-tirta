@@ -35,10 +35,11 @@ export async function POST(request: NextRequest) {
     }
 
     let history: AiChatMessage[] = [];
+    const contextProductIds: string[] = [];
     if (Array.isArray(body.history)) {
       history = body.history
         .filter(
-          (h): h is AiChatMessage =>
+          (h): h is { role: string; content: string; productIds?: unknown } =>
             !!h &&
             typeof h === "object" &&
             ((h as { role?: unknown }).role === "user" ||
@@ -46,16 +47,32 @@ export async function POST(request: NextRequest) {
             typeof (h as { content?: unknown }).content === "string",
         )
         .slice(-8)
-        .map((h) => ({
-          role: h.role,
-          content: h.content.slice(0, 2000),
-        }));
+        .map((h) => {
+          // Kumpulkan ID produk dari balasan asisten sebelumnya (maks 3,
+          // format UUID) — divalidasi ulang dari DB oleh buildChatContext.
+          if (h.role === "assistant" && Array.isArray(h.productIds)) {
+            for (const id of h.productIds.slice(0, 3)) {
+              if (
+                typeof id === "string" &&
+                /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) &&
+                contextProductIds.length < 6 &&
+                !contextProductIds.includes(id)
+              ) {
+                contextProductIds.push(id);
+              }
+            }
+          }
+          return {
+            role: h.role as "user" | "assistant",
+            content: h.content.slice(0, 2000),
+          };
+        });
     }
 
     // 1. Grounding: query terkini dari DB, discoping peran sesi login.
     let context;
     try {
-      context = await buildChatContext(user, message);
+      context = await buildChatContext(user, message, { contextProductIds });
     } catch (dbErr) {
       // DB tidak tersedia → jawab ramah tanpa stack trace (A5).
       console.error(
@@ -78,6 +95,7 @@ export async function POST(request: NextRequest) {
       history,
       products: context.products,
       sections: context.sections,
+      contextProducts: context.contextProducts,
     });
 
     return Response.json(result);

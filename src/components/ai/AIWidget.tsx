@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { formatRupiah } from "@/lib/format";
+import { useSessionUser } from "@/components/layout/use-session-user";
 import "./ai-widget.css";
 
 type Product = {
@@ -38,6 +39,7 @@ const HIDDEN_PREFIXES = ["/seller", "/admin", "/login", "/register"];
 
 export function AIWidget() {
   const pathname = usePathname();
+  const sessionUser = useSessionUser();
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([GREETING]);
   const [input, setInput] = useState("");
@@ -45,6 +47,22 @@ export function AIWidget() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const nextId = useRef(1);
+  const lastUserId = useRef<string | null | undefined>(undefined);
+
+  // Isolasi konteks per akun: reset riwayat chat saat login/logout/ganti akun
+  // — jangan membawa konteks percakapan akun sebelumnya.
+  useEffect(() => {
+    if (lastUserId.current === undefined) {
+      lastUserId.current = sessionUser?.id ?? null; // mount pertama: jangan reset
+      return;
+    }
+    if (lastUserId.current !== (sessionUser?.id ?? null)) {
+      lastUserId.current = sessionUser?.id ?? null;
+      setMessages([GREETING]);
+      nextId.current = 1;
+      setOpen(false);
+    }
+  }, [sessionUser?.id]);
 
   useEffect(() => {
     if (open) {
@@ -64,7 +82,15 @@ export function AIWidget() {
 
     const history = messages
       .filter((m) => !m.error)
-      .map((m) => ({ role: m.role, content: m.text }));
+      .map((m) => ({
+        role: m.role,
+        content: m.text,
+        // Sertakan ID produk dari balasan sebelumnya — backend memvalidasi
+        // ulang harga/stoknya dari DB (bukan ingatan model).
+        ...(m.products && m.products.length > 0
+          ? { productIds: m.products.slice(0, 3).map((p) => p.id) }
+          : {}),
+      }));
     const userId = nextId.current++;
     const assistantId = nextId.current++;
 

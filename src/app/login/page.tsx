@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { notifySessionChanged } from "@/components/layout/use-session-user";
 import "../auth.css";
 
 function LoginForm() {
@@ -40,6 +41,7 @@ function LoginForm() {
       // halaman bisa di-prerender statis tanpa fallback Suspense kosong.
       const next = new URLSearchParams(window.location.search).get("next");
       const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+      notifySessionChanged(); // navbar & widget chat segarkan sesi (reset konteks chat)
       router.push(safeNext);
       router.refresh();
     } catch {

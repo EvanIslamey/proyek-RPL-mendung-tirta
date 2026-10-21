@@ -288,16 +288,21 @@ export default function BuyerProfilePage() {
     <>
       <div className="dash-head">
         <div>
-          <h1>Akun Saya</h1>
+          <h1>Informasi Diri</h1>
           <p>
             {profile
               ? `Anggota sejak ${formatDateId(profile.createdAt)} • ${profile.orderCount} pesanan`
               : ""}
           </p>
         </div>
-        <Link href="/orders" className="btn btn-outline btn-sm">
-          Lihat Pesanan Saya →
-        </Link>
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+          <Link href="/buyer/dashboard" className="btn btn-outline btn-sm">
+            Dashboard Belanja →
+          </Link>
+          <Link href="/orders" className="btn btn-outline btn-sm">
+            Lihat Pesanan Saya →
+          </Link>
+        </div>
       </div>
 
       <div

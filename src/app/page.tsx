@@ -28,8 +28,6 @@ export default function Home() {
             className={`nav-links${navOpen ? " open" : ""}`}
             onClick={() => setNavOpen(false)}
           >
-            <a href="#about">Tentang Kami</a>
-            <a href="#features">Layanan</a>
             <Link href="/products">Katalog</Link>
             <DashboardLink />
             <AuthNav />

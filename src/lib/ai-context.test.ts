@@ -20,6 +20,28 @@ describe("detectIntents (AI context routing)", () => {
     expect(detectIntents("jumlah pengguna platform")).toContain("stats");
   });
 
+  it("mendeteksi intent 'product' untuk pertanyaan produk", () => {
+    expect(detectIntents("berapa harga joran tegek")).toContain("product");
+    expect(detectIntents("produk apa yang tersedia")).toContain("product");
+    expect(detectIntents("cari umpan untuk casting")).toContain("product");
+    expect(detectIntents("apakah umpan minnow masih ada")).toContain("product");
+    expect(detectIntents("kategori apa saja yang ada")).toContain("product");
+  });
+
+  it("mendeteksi intent 'appinfo' untuk pertanyaan layanan/panduan", () => {
+    expect(detectIntents("apa saja layanan mendung tirta")).toContain("appinfo");
+    expect(detectIntents("tentang kami dong")).toContain("appinfo");
+    expect(detectIntents("gimana cara belanja")).toContain("appinfo");
+    expect(detectIntents("cara mendaftar gimana")).toContain("appinfo");
+    expect(detectIntents("faq apa saja")).toContain("appinfo");
+  });
+
+  it("statistik jumlah penjual/pembeli terdeteksi intent stats", () => {
+    expect(detectIntents("berapa jumlah penjual")).toContain("stats");
+    expect(detectIntents("berapa jumlah pembeli")).toContain("stats");
+    expect(detectIntents("jumlah toko aktif berapa")).toContain("stats");
+  });
+
   it("mendeteksi intent 'lowstock' untuk pertanyaan stok menipis", () => {
     expect(detectIntents("stok menipis")).toContain("lowstock");
     expect(detectIntents("stok hampir habis")).toContain("lowstock");

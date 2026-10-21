@@ -24,7 +24,17 @@ import type { SafeUser } from "./auth";
 export type ContextScope = "publik" | "milik-sendiri" | "toko-sendiri" | "admin";
 
 export type ContextSection = {
-  key: "orders" | "sales" | "stats" | "lowstock" | "outofstock" | "store" | "account" | "catalog";
+  key:
+    | "orders"
+    | "sales"
+    | "stats"
+    | "market"
+    | "lowstock"
+    | "outofstock"
+    | "store"
+    | "account"
+    | "catalog"
+    | "appinfo";
   label: string;
   scope: ContextScope;
   asOf: string; // ISO waktu pengambilan (untuk sumber/jawaban "diperbarui saat…")
@@ -34,6 +44,8 @@ export type ContextSection = {
 export type ChatContext = {
   products: AiProduct[];
   sections: ContextSection[];
+  /** Produk dari riwayat percakapan (divalidasi ulang dari DB). */
+  contextProducts: AiProduct[];
   generatedAt: string;
 };
 
@@ -56,50 +68,95 @@ const fmtDate = (d: Date): string =>
 
 const rupiah = (n: number): string => `Rp${Math.round(n).toLocaleString("id-ID")}`;
 
+/** Kategori intent — menentukan fetcher mana yang boleh dijalankan. */
+export type ChatIntent =
+  | "product"
+  | "order"
+  | "sales"
+  | "stats"
+  | "lowstock"
+  | "outofstock"
+  | "store"
+  | "account"
+  | "appinfo";
+
 /**
  * Deteksi jenis pertanyaan (murni, tanpa AI — bisa diuji unit test).
  * Hanya menentukan FETCHER mana yang boleh dijalankan; otorisasi tetap
  * diputuskan per peran di `buildChatContext`.
  */
-export function detectIntents(message: string): Set<"order" | "sales" | "stats" | "lowstock" | "outofstock" | "store" | "account"> {
+export function detectIntents(message: string): Set<ChatIntent> {
   const m = message.toLowerCase();
   const has = (...words: string[]) => words.some((w) => m.includes(w));
-  const intents = new Set<"order" | "sales" | "stats" | "lowstock" | "outofstock" | "store" | "account">();
+  const intents = new Set<ChatIntent>();
 
+  // A. Produk / katalog (harga, ketersediaan, kategori, rekomendasi…)
+  if (
+    has(
+      "harga", "produk", "katalog", "tersedia", "stok", "kategori", "beli",
+      "rekomendasi", "murah", "mahal", "ready", "varian", "ukuran", "ulasan",
+      "review", "rating", "diskon", "restock", "masih ada", "ada nggak",
+      "ada gak", "mau cari", "cari", "dijual",
+    )
+  ) {
+    intents.add("product");
+  }
+  // B. Pesanan
   if (has("pesanan", "pembelian", "order", "checkout", "bayar", "dibayar", "dikirim")) {
     intents.add("order");
   }
+  // Penjualan (penjual)
   if (has("penjualan", "omzet", "pendapatan", "revenue", "terjual", "penghasilan", "laku")) {
     intents.add("sales");
   }
-  if (has("statistik", "statistic", "rekap", "jumlah pengguna", "total pengguna", "performa platform")) {
+  // Statistik marketplace (jawaban penuh khusus ADMIN)
+  if (
+    has(
+      "statistik", "statistic", "rekap", "jumlah pengguna", "total pengguna",
+      "performa platform", "jumlah penjual", "jumlah pembeli", "total penjual",
+      "total pembeli", "berapa penjual", "berapa pembeli", "banyak penjual",
+      "banyak pembeli", "jumlah toko", "berapa toko",
+    )
+  ) {
     intents.add("stats");
   }
+  // Stok menipis vs stok habis — "hampir habis" bukan habis.
   const wantsLowStock = has("stok menipis", "hampir habis", "stok tersisa", "stok sedikit", "menipis");
   if (wantsLowStock) {
     intents.add("lowstock");
   }
-  // Produk habis / out of stock — "hampir habis" bukan habis (sudah tertangani lowstock).
   const withoutNearly = m.replace(/hampir habis/g, " ");
   if (/(^|[^a-z])habis|out of stock|sold out|stok 0|kehabisan/.test(withoutNearly)) {
     intents.add("outofstock");
   }
+  // Toko / penjual (profil toko publik)
   if (has("toko", "penjual", "seller", "penjualnya", "tokonya", "siapa yang jual")) {
     intents.add("store");
   }
-  // Account intent: gunakan kata kunci individual (bukan frasa penuh) agar cocok
-  // meskipun ada kata di antaranya.
+  // C. Akun sendiri
   if (
     has(
       "siapa saya", "akun saya", "profil saya", "informasi akun", "nama saya", "email saya",
       "login sebagai", "kapan daftar", "bergabung sejak", "role saya", "peran saya",
       "ubah profil", "ganti profil", "edit profil", "akun apa", "profil apa",
       "daftar kapan", "sejak kapan", "peran apa", "role apa",
+      "alamat saya", "ganti nama", "ganti alamat", "ubah alamat", "ubah nama",
       // kata kunci individual untuk menangkap variasi
       "daftar", "sejak", "peran", "role", "akun", "profil", "email", "password", "sandi", "kata sandi"
     )
   ) {
     intents.add("account");
+  }
+  // E. Informasi aplikasi (layanan, tentang kami, panduan)
+  if (
+    has(
+      "layanan", "tentang kami", "apa itu mendung", "siapa mendung", "tentang mendung",
+      "cara belanja", "cara beli", "cara pesan", "cara daftar", "cara mendaftar",
+      "cara checkout", "cara bayar", "gimana cara", "bagaimana cara", "cara menggunakan",
+      "panduan", "bantuan", "faq", "fitur apa", "layanan apa", "bisa apa",
+    )
+  ) {
+    intents.add("appinfo");
   }
   return intents;
 }
@@ -293,8 +350,14 @@ async function fetchStats(user: SafeUser): Promise<ContextSection | null> {
           )
           .join(", ");
 
+  const roleCount = (role: string): number =>
+    users.find((u) => u.role === role)?._count ?? 0;
+
   const text = [
-    fmt(users.map((u) => ({ role: u.role, _count: u._count })), "Pengguna per role"),
+    `Jumlah pengguna total: ${users.reduce((a, u) => a + u._count, 0)}`,
+    `Jumlah penjual (role SELLER): ${roleCount("SELLER")}`,
+    `Jumlah pembeli (role BUYER): ${roleCount("BUYER")}`,
+    `Jumlah admin (role ADMIN): ${roleCount("ADMIN")}`,
     fmt(products.map((p) => ({ status: p.status, _count: p._count })), "Produk per status"),
     fmt(orders.map((o) => ({ status: o.status, _count: o._count })), "Pesanan per status"),
     `Pendapatan (pesanan dibayar/dikirim/selesai): ${rupiah(Number(paidAgg._sum.total ?? 0))}`,
@@ -305,6 +368,48 @@ async function fetchStats(user: SafeUser): Promise<ContextSection | null> {
     key: "stats",
     label: "Statistik marketplace (admin)",
     scope: "admin",
+    asOf: new Date().toISOString(),
+    text,
+  };
+}
+
+/**
+ * Jangkauan marketplace untuk NON-admin: jumlah toko aktif = data publik.
+ * Jumlah pembeli/pengguna adalah data internal → hanya admin (fetchStats).
+ */
+async function fetchMarketReach(user: SafeUser, message: string): Promise<ContextSection> {
+  const activeStores = await prisma.store.count({ where: { isActive: true } });
+  const asksBuyer = /pembeli|buyer/.test(message.toLowerCase());
+
+  const lines = [
+    `Toko aktif di marketplace: ${activeStores} (data publik)`,
+    asksBuyer
+      ? "Jumlah pembeli/pengguna adalah data internal platform — hanya tersedia untuk admin."
+      : "",
+  ];
+
+  return {
+    key: "market",
+    label: "Jangkauan marketplace (data publik)",
+    scope: "publik",
+    asOf: new Date().toISOString(),
+    text: lines.filter(Boolean).join("\n"),
+  };
+}
+
+/** Informasi aplikasi statis (layanan, tentang kami, panduan) — tanpa DB. */
+async function fetchAppInfo(): Promise<ContextSection> {
+  const text = [
+    "Layanan Mendung Tirta: marketplace hasil laut segar (ikan, cumi-cumi, udang, dll.) dan alat pancing dari toko lokal terpercaya.",
+    "Fitur yang tersedia: katalog produk, keranjang belanja, checkout & pembayaran, pelacakan pesanan, ulasan produk, notifikasi email & Telegram, dan asisten AI ini.",
+    "Tentang Kami: Mendung Tirta lahir dari kota pinggir laut, menghubungkan nelayan dan penjual perlengkapan memancing lokal langsung dengan pembeli — tanpa perantara berlebihan; hasil panen segar pagi hari sampai ke meja Anda.",
+    "Panduan singkat: (1) Daftar atau masuk akun, (2) telusuri katalog, (3) tambahkan produk ke keranjang, (4) selesaikan checkout dan pembayaran, (5) pantau status pesanan di Dashboard, (6) ubah nama/alamat/password di menu akun → Informasi Diri.",
+  ].join("\n");
+
+  return {
+    key: "appinfo",
+    label: "Informasi layanan & panduan Mendung Tirta",
+    scope: "publik",
     asOf: new Date().toISOString(),
     text,
   };
@@ -489,7 +594,7 @@ async function fetchStores(keywords: string[]): Promise<ContextSection | null> {
 }
 
 /** Informasi akun pengguna yang sedang login — aman, hanya milik sendiri. */
-async function fetchAccount(user: SafeUser): Promise<ContextSection | null> {
+async function fetchAccount(user: SafeUser, message: string): Promise<ContextSection | null> {
   const dbUser = await prisma.user.findUnique({
     where: { id: user.id },
     select: {
@@ -532,6 +637,13 @@ async function fetchAccount(user: SafeUser): Promise<ContextSection | null> {
     );
   }
 
+  // Pertanyaan "cara mengubah profil/password" → panduan navigasi aktual.
+  if (/\bcara\b|mengubah|mengganti|bagaimana/.test(message.toLowerCase())) {
+    lines.push(
+      'Panduan: ubah nama/alamat lewat menu akun → "Informasi Diri" (Profil Saya); ubah password di bagian "Ganti Password" pada halaman yang sama.',
+    );
+  }
+
   return {
     key: "account",
     label: "Informasi akun Anda",
@@ -545,29 +657,91 @@ async function fetchAccount(user: SafeUser): Promise<ContextSection | null> {
 /* Orkestrasi                                                          */
 /* ------------------------------------------------------------------ */
 
+/** Ambil ulang produk dari DB berdasarkan ID riwayat (validasi data terkini). */
+async function fetchProductsByIds(ids: string[]): Promise<AiProduct[]> {
+  if (ids.length === 0) return [];
+  const rows = await prisma.product.findMany({
+    where: { id: { in: ids }, status: { not: "HIDDEN" } },
+    select: {
+      id: true,
+      name: true,
+      price: true,
+      stock: true,
+      image: true,
+      status: true,
+      store: { select: { storeName: true } },
+      category: { select: { name: true } },
+      reviews: { select: { rating: true } },
+    },
+  });
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return ids
+    .filter((id) => byId.has(id))
+    .map((id) => {
+      const r = byId.get(id)!;
+      const avg =
+        r.reviews.length > 0
+          ? r.reviews.reduce((a, x) => a + x.rating, 0) / r.reviews.length
+          : 0;
+      return {
+        id: r.id,
+        name: r.name,
+        price: Number(r.price),
+        stock: r.stock,
+        image: r.image,
+        storeName: r.store.storeName,
+        categoryName: r.category.name,
+        rating: Math.round(avg * 10) / 10,
+        ratingCount: r.reviews.length,
+      };
+    });
+}
+
 /**
  * Susun konteks chatbot untuk satu pertanyaan:
- * pencarian katalog (publik) + section sesuai intent & PERAN sesi login.
+ * pencarian katalog (hanya bila relevan dengan topik produk) + section
+ * sesuai intent & PERAN sesi login + produk dari konteks percakapan
+ * sebelumnya (divalidasi ulang dari DB — bukan ingatan model).
  * Melempar bila DB gagal → route menangkap dan menjawab dengan pesan
  * "layanan data tidak tersedia" (tanpa stack trace).
  */
-export async function buildChatContext(user: SafeUser, message: string): Promise<ChatContext> {
+export async function buildChatContext(
+  user: SafeUser,
+  message: string,
+  opts?: { contextProductIds?: string[] },
+): Promise<ChatContext> {
   const keywords = extractKeywords(message);
   const intents = detectIntents(message);
 
-  const products = await searchCatalog(keywords);
+  // Katalog hanya relevan untuk pertanyaan berbasis produk — jangan kirim
+  // daftar produk untuk pertanyaan akun/statistik/pesanan/info aplikasi.
+  const strongNonCatalog =
+    intents.has("stats") || intents.has("appinfo") || intents.has("account");
+  const catalogIntent =
+    intents.has("product") || intents.has("lowstock") || intents.has("outofstock");
+  const catalogRelevant =
+    !strongNonCatalog && (catalogIntent || (keywords.length > 0 && !intents.has("order")));
+
+  const products = catalogRelevant ? await searchCatalog(keywords) : [];
+
+  // Produk dari konteks percakapan sebelumnya (ID valid dari sesi yang sama,
+  // divalidasi ulang dari DB — harga/stok terkini, bukan ingatan model).
+  const contextProducts = await fetchProductsByIds(opts?.contextProductIds ?? []);
 
   const jobs: (Promise<ContextSection | null> | null)[] = [];
-  jobs.push(fetchCatalogSummary()); // selalu — agar "kosong" vs "habis" tidak tertukar
+  if (catalogRelevant) jobs.push(fetchCatalogSummary()); // "kosong" vs "habis" tidak tertukar
   if (intents.has("order")) jobs.push(fetchOrders(user));
   if (intents.has("sales")) jobs.push(fetchSales(user));
   if (intents.has("stats")) jobs.push(fetchStats(user));
+  // "berapa jumlah penjual?" non-admin → jawab data publik (toko aktif).
+  if (intents.has("stats") && user.role !== "ADMIN") jobs.push(fetchMarketReach(user, message));
   if (intents.has("lowstock")) jobs.push(fetchLowStock(user, message));
   if (intents.has("outofstock")) jobs.push(fetchOutOfStock(user, message));
   if (intents.has("store")) jobs.push(fetchStores(keywords));
-  if (intents.has("account")) jobs.push(fetchAccount(user));
+  if (intents.has("account")) jobs.push(fetchAccount(user, message));
+  if (intents.has("appinfo")) jobs.push(fetchAppInfo());
 
   const sections = (await Promise.all(jobs)).filter((s): s is ContextSection => s !== null);
 
-  return { products, sections, generatedAt: new Date().toISOString() };
+  return { products, sections, contextProducts, generatedAt: new Date().toISOString() };
 }

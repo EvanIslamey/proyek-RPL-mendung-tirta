@@ -39,8 +39,6 @@ export function SiteNav() {
         >
           <Link href="/products">Katalog</Link>
           <DashboardLink />
-          <Link href="/#features">Layanan</Link>
-          <Link href="/#about">Tentang Kami</Link>
           <Link href="/cart" className="site-cart-link" aria-label={`Keranjang, ${totalCount} item`}>
             🛒
             {totalCount > 0 && <span className="site-cart-badge">{totalCount}</span>}

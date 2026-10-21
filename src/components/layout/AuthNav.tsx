@@ -3,17 +3,15 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { dashboardHrefFor, profileHrefFor } from "./account-routes";
+import { profileHrefFor } from "./account-routes";
 import { notifySessionChanged, useSessionUser } from "./use-session-user";
 
 /**
  * Aksi autentikasi di navbar:
  * - Tamu  -> tombol "Masuk" (link ke /login)
- * - Login -> dropdown akun "Informasi Akun" dengan:
- *   Profil Saya, Dashboard, Informasi Akun, Layanan, Tentang Kami,
- *   Pengaturan, Keluar.
- * Sesi diambil lewat hook bersama (useSessionUser) sehingga link Dashboard
- * di navbar dan dropdown ini selalu konsisten.
+ * - Login -> dropdown "Menu akun": Informasi Diri (profil), Layanan,
+ *   Tentang Kami, Keluar. Dashboard ada di navbar utama (DashboardLink).
+ * Sesi diambil lewat hook bersama (useSessionUser) agar konsisten.
  */
 export function AuthNav() {
   const router = useRouter();
@@ -79,27 +77,9 @@ export function AuthNav() {
               onClick={() => setMenuOpen(false)}
             >
               <span className="nav-account-icon" aria-hidden="true">👤</span>
-              <span>Profil Saya</span>
+              <span>Informasi Diri</span>
             </Link>
-            <Link
-              href={dashboardHrefFor(user.role)}
-              className="nav-account-item"
-              role="menuitem"
-              onClick={() => setMenuOpen(false)}
-            >
-              <span className="nav-account-icon" aria-hidden="true">📊</span>
-              <span>Dashboard</span>
-            </Link>
-            <Link
-              href={profileHrefFor(user.role)}
-              className="nav-account-item"
-              role="menuitem"
-              onClick={() => setMenuOpen(false)}
-            >
-              <span className="nav-account-icon" aria-hidden="true">ℹ️</span>
-              <span>Informasi Akun</span>
-            </Link>
-            {/* Layanan & Tentang Kami = section pada halaman publik (tanpa login). */}
+            {/* Layanan & Tentang Kami = section publik halaman beranda (tanpa login). */}
             <Link
               href="/#features"
               className="nav-account-item"
@@ -117,15 +97,6 @@ export function AuthNav() {
             >
               <span className="nav-account-icon" aria-hidden="true">📖</span>
               <span>Tentang Kami</span>
-            </Link>
-            <Link
-              href={profileHrefFor(user.role)}
-              className="nav-account-item"
-              role="menuitem"
-              onClick={() => setMenuOpen(false)}
-            >
-              <span className="nav-account-icon" aria-hidden="true">⚙️</span>
-              <span>Pengaturan</span>
             </Link>
             <hr className="nav-account-divider" />
             <button

@@ -5,7 +5,7 @@
  * Route aktual dari repository (jangan menebak):
  * - ADMIN  → /admin/dashboard (admin/layout.tsx + admin/dashboard/page.tsx)
  * - SELLER → /seller/dashboard (seller/layout.tsx + seller/dashboard/page.tsx)
- * - BUYER  → /buyer (area akun pembeli; proyek tidak punya /buyer/dashboard)
+ * - BUYER  → /buyer/dashboard (ringkasan belanja; /buyer = Informasi Diri)
  */
 export function dashboardHrefFor(role: string): string {
   switch (role) {
@@ -15,11 +15,11 @@ export function dashboardHrefFor(role: string): string {
       return "/seller/dashboard";
     case "BUYER":
     default:
-      return "/buyer";
+      return "/buyer/dashboard";
   }
 }
 
-/** Halaman profil/ pengaturan akun per role (guard ada di layout segmen). */
+/** Halaman profil / Informasi Diri per role (guard ada di layout segmen). */
 export function profileHrefFor(role: string): string {
   switch (role) {
     case "ADMIN":
