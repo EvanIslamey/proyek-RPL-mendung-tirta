@@ -3,35 +3,24 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-
-type SessionUser = { id: string; name: string; role: string };
+import { dashboardHrefFor, profileHrefFor } from "./account-routes";
+import { notifySessionChanged, useSessionUser } from "./use-session-user";
 
 /**
  * Aksi autentikasi di navbar:
  * - Tamu  -> tombol "Masuk" (link ke /login)
- * - Login -> dropdown akun dengan: Profil Saya, Informasi Akun, Pengaturan, Keluar
+ * - Login -> dropdown akun "Informasi Akun" dengan:
+ *   Profil Saya, Dashboard, Informasi Akun, Layanan, Tentang Kami,
+ *   Pengaturan, Keluar.
+ * Sesi diambil lewat hook bersama (useSessionUser) sehingga link Dashboard
+ * di navbar dan dropdown ini selalu konsisten.
  */
 export function AuthNav() {
   const router = useRouter();
-  const [user, setUser] = useState<SessionUser | null>(null);
+  const user = useSessionUser();
   const [loggingOut, setLoggingOut] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    let alive = true;
-    fetch("/api/auth/me", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : { user: null }))
-      .then((d: { user?: SessionUser | null }) => {
-        if (alive) setUser(d.user ?? null);
-      })
-      .catch(() => {
-        /* server belum siap — tetap tampilkan keadaan tamu */
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -53,25 +42,14 @@ export function AuthNav() {
     setLoggingOut(true);
     try {
       await fetch("/api/auth/logout", { method: "POST" });
-      setUser(null);
+      // Beri tahu semua komponen navbar (AuthNav, DashboardLink) bahwa
+      // sesi berakhir — link Dashboard ikut hilang dari navbar.
+      notifySessionChanged();
       router.refresh();
     } catch {
       /* biarkan state; pengguna bisa mencoba lagi */
     } finally {
       setLoggingOut(false);
-    }
-  }
-
-  // Determine profile route based on role
-  function getProfileHref(role: string): string {
-    switch (role) {
-      case "ADMIN":
-        return "/admin/profile";
-      case "SELLER":
-        return "/seller/profile";
-      case "BUYER":
-      default:
-        return "/buyer";
     }
   }
 
@@ -95,7 +73,7 @@ export function AuthNav() {
         {menuOpen && (
           <div className="nav-account-menu" role="menu">
             <Link
-              href={getProfileHref(user.role)}
+              href={profileHrefFor(user.role)}
               className="nav-account-item"
               role="menuitem"
               onClick={() => setMenuOpen(false)}
@@ -104,7 +82,16 @@ export function AuthNav() {
               <span>Profil Saya</span>
             </Link>
             <Link
-              href={getProfileHref(user.role)}
+              href={dashboardHrefFor(user.role)}
+              className="nav-account-item"
+              role="menuitem"
+              onClick={() => setMenuOpen(false)}
+            >
+              <span className="nav-account-icon" aria-hidden="true">📊</span>
+              <span>Dashboard</span>
+            </Link>
+            <Link
+              href={profileHrefFor(user.role)}
               className="nav-account-item"
               role="menuitem"
               onClick={() => setMenuOpen(false)}
@@ -112,8 +99,27 @@ export function AuthNav() {
               <span className="nav-account-icon" aria-hidden="true">ℹ️</span>
               <span>Informasi Akun</span>
             </Link>
+            {/* Layanan & Tentang Kami = section pada halaman publik (tanpa login). */}
             <Link
-              href="/buyer"
+              href="/#features"
+              className="nav-account-item"
+              role="menuitem"
+              onClick={() => setMenuOpen(false)}
+            >
+              <span className="nav-account-icon" aria-hidden="true">🛍️</span>
+              <span>Layanan</span>
+            </Link>
+            <Link
+              href="/#about"
+              className="nav-account-item"
+              role="menuitem"
+              onClick={() => setMenuOpen(false)}
+            >
+              <span className="nav-account-icon" aria-hidden="true">📖</span>
+              <span>Tentang Kami</span>
+            </Link>
+            <Link
+              href={profileHrefFor(user.role)}
               className="nav-account-item"
               role="menuitem"
               onClick={() => setMenuOpen(false)}

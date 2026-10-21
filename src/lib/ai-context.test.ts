@@ -25,6 +25,20 @@ describe("detectIntents (AI context routing)", () => {
     expect(detectIntents("stok hampir habis")).toContain("lowstock");
   });
 
+  it("mendeteksi intent 'outofstock' untuk pertanyaan produk habis", () => {
+    expect(detectIntents("produk apa yang habis")).toContain("outofstock");
+    expect(detectIntents("stok habis semua")).toContain("outofstock");
+    expect(detectIntents("jualannya sudah out of stock")).toContain("outofstock");
+    expect(detectIntents("umpan mana yang sold out")).toContain("outofstock");
+    expect(detectIntents("stok 0")).toContain("outofstock");
+  });
+
+  it("'hampir habis' = stok menipis, bukan habis", () => {
+    const intents = detectIntents("stok hampir habis");
+    expect(intents).toContain("lowstock");
+    expect(intents).not.toContain("outofstock");
+  });
+
   it("mendeteksi intent 'store' untuk pertanyaan toko", () => {
     expect(detectIntents("toko di surabaya")).toContain("store");
     expect(detectIntents("penjualnya siapa")).toContain("store");

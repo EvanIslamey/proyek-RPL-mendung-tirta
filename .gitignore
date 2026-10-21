@@ -46,3 +46,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Artefak email dev (file .eml hasil notifikasi saat testing)
+mail-outbox/

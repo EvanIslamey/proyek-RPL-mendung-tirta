@@ -4,6 +4,7 @@ import React, { useState } from "react";
 import Link from "next/link";
 import "./home.css"; // We will create this specific CSS file for home page
 import { AuthNav } from "@/components/layout/AuthNav";
+import { DashboardLink } from "@/components/layout/DashboardLink";
 
 export default function Home() {
   const [navOpen, setNavOpen] = useState(false);
@@ -30,6 +31,7 @@ export default function Home() {
             <a href="#about">Tentang Kami</a>
             <a href="#features">Layanan</a>
             <Link href="/products">Katalog</Link>
+            <DashboardLink />
             <AuthNav />
           </nav>
         </div>

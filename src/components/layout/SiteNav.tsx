@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { AuthNav } from "./AuthNav";
+import { DashboardLink } from "./DashboardLink";
 import { useCart } from "@/components/cart/CartContext";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
 import "./site-nav.css";
@@ -37,6 +38,7 @@ export function SiteNav() {
           onClick={() => setOpen(false)}
         >
           <Link href="/products">Katalog</Link>
+          <DashboardLink />
           <Link href="/#features">Layanan</Link>
           <Link href="/#about">Tentang Kami</Link>
           <Link href="/cart" className="site-cart-link" aria-label={`Keranjang, ${totalCount} item`}>

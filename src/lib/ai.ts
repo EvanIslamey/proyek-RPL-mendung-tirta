@@ -70,6 +70,7 @@ export async function searchCatalog(keywords: string[]): Promise<AiProduct[]> {
   );
   const match = Prisma.join(conds, " OR ");
 
+  // Cari produk yang match keyword
   const rows = await prisma.$queryRaw<
     {
       id: string;
@@ -94,11 +95,54 @@ export async function searchCatalog(keywords: string[]): Promise<AiProduct[]> {
       SELECT "productId", AVG(rating) AS "ratingAvg", COUNT(*) AS "ratingCount"
       FROM "Review" GROUP BY "productId"
     ) r ON r."productId" = p.id
-    WHERE p.status <> 'HIDDEN' AND p.stock > 0
+    WHERE p.status = 'AVAILABLE' AND p.stock > 0
       AND (${match})
     ORDER BY (r."ratingAvg" IS NULL), r."ratingAvg" DESC, p.stock DESC
     LIMIT 8
   `);
+
+  // Jika tidak ada produk yang match keyword, kembalikan produk AVAILABLE terbaru
+  if (rows.length === 0) {
+    const fallbackRows = await prisma.$queryRaw<
+      {
+        id: string;
+        name: string;
+        price: string | number;
+        stock: number;
+        image: string | null;
+        storeName: string;
+        categoryName: string;
+        rating: number;
+        ratingCount: number;
+      }[]
+    >(Prisma.sql`
+      SELECT p.id, p.name, p.price::float AS price, p.stock, p.image,
+             s."storeName" AS "storeName", c.name AS "categoryName",
+             COALESCE(r."ratingAvg", 0)::float AS rating,
+             COALESCE(r."ratingCount", 0)::int AS "ratingCount"
+      FROM "Product" p
+      JOIN "Store" s ON s.id = p."storeId" AND s."isActive" = true
+      JOIN "Category" c ON c.id = p."categoryId"
+      LEFT JOIN (
+        SELECT "productId", AVG(rating) AS "ratingAvg", COUNT(*) AS "ratingCount"
+        FROM "Review" GROUP BY "productId"
+      ) r ON r."productId" = p.id
+      WHERE p.status = 'AVAILABLE' AND p.stock > 0
+      ORDER BY p."createdAt" DESC
+      LIMIT 8
+    `);
+    return fallbackRows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      price: Number(r.price),
+      stock: r.stock,
+      image: r.image,
+      storeName: r.storeName,
+      categoryName: r.categoryName,
+      rating: Math.round((r.rating ?? 0) * 10) / 10,
+      ratingCount: r.ratingCount ?? 0,
+    }));
+  }
 
   return rows.map((r) => ({
     id: r.id,
@@ -143,6 +187,10 @@ const SYSTEM_PROMPT = [
   "8. Singkat, ramah, maksimal ±150 kata, tanpa basa-basi berlebihan.",
   "9. Sapaan dan pertanyaan umum layanan (apa itu Mendung Tirta, cara belanja) dijawab singkat dan wajar tanpa menyebut produk.",
   "10. Pertanyaan tentang akun sendiri (nama, email, peran, alamat, tanggal daftar, info toko jika penjual) dijawab dari DATA KONTEKS section 'Informasi akun Anda' — jangan mengarang data yang tidak ada di konteks.",
+  "11. Pertanyaan 'apa saja produk yang tersedia' dijawab dengan daftar produk dari KATALOG (nama, harga, stok, toko) beserta arahan membuka /products untuk katalog lengkap.",
+  "12. Saat menyebut kondisi katalog, patuhi section 'Ringkasan katalog': hanya boleh menyatakan 'katalog kosong' bila Total produk non-hidden = 0. Bila ada produk tetapi tersedia = 0, katakan produk ditemukan namun semua stoknya habis (rujuk daftar pada section 'Produk dengan stok habis'). Bila tersedia > 0, jangan pernah menyatakan katalog kosong.",
+  "13. Bila pertanyaan tentang produk habis/out of stock, jawab dari section 'Produk dengan stok habis' (KATALOG berisi produk yang masih tersedia — jangan tertukar).",
+  "14. Bila pertanyaan lanjutan tidak jelas (mis. 'apakah masih ada?' tanpa konteks produk), gunakan produk/balasan sebelumnya bila masih jelas dari riwayat; bila tidak jelas, tanyakan produk mana yang dimaksud.",
 ].join("\n");
 
 /** Format section konteks per-peran + katalog untuk prompt model. */
@@ -176,10 +224,25 @@ function fallbackResult(opts: {
 
   if (opts.sections.length > 0) {
     const body = opts.sections.map((s) => `${s.label}:\n${s.text}`).join("\n\n");
+    // Sertakan daftar produk bila ada — agar mode tanpa AI tetap bisa
+    // menjawab "apa saja produk yang tersedia" dengan daftar nyata.
+    const productList =
+      opts.products.length > 0
+        ? "\n\nProduk dari katalog:\n" +
+          opts.products
+            .slice(0, 5)
+            .map(
+              (p, i) =>
+                `${i + 1}. ${p.name} — Rp${p.price.toLocaleString("id-ID")} (stok ${p.stock}, ${p.storeName})`,
+            )
+            .join("\n") +
+          "\n\nBuka /products untuk katalog lengkap."
+        : "";
     return {
       reply:
         "Berikut data terkini dari aplikasi (mode katalog — tanpa model AI):\n\n" +
-        body.slice(0, 1800),
+        body.slice(0, 1600) +
+        productList.slice(0, 600),
       products: opts.products.slice(0, 5),
       sources,
       generatedAt: opts.generatedAt,

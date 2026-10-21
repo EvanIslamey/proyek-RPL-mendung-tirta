@@ -24,7 +24,7 @@ import type { SafeUser } from "./auth";
 export type ContextScope = "publik" | "milik-sendiri" | "toko-sendiri" | "admin";
 
 export type ContextSection = {
-  key: "orders" | "sales" | "stats" | "lowstock" | "store" | "account";
+  key: "orders" | "sales" | "stats" | "lowstock" | "outofstock" | "store" | "account" | "catalog";
   label: string;
   scope: ContextScope;
   asOf: string; // ISO waktu pengambilan (untuk sumber/jawaban "diperbarui saat…")
@@ -61,10 +61,10 @@ const rupiah = (n: number): string => `Rp${Math.round(n).toLocaleString("id-ID")
  * Hanya menentukan FETCHER mana yang boleh dijalankan; otorisasi tetap
  * diputuskan per peran di `buildChatContext`.
  */
-export function detectIntents(message: string): Set<"order" | "sales" | "stats" | "lowstock" | "store" | "account"> {
+export function detectIntents(message: string): Set<"order" | "sales" | "stats" | "lowstock" | "outofstock" | "store" | "account"> {
   const m = message.toLowerCase();
   const has = (...words: string[]) => words.some((w) => m.includes(w));
-  const intents = new Set<"order" | "sales" | "stats" | "lowstock" | "store" | "account">();
+  const intents = new Set<"order" | "sales" | "stats" | "lowstock" | "outofstock" | "store" | "account">();
 
   if (has("pesanan", "pembelian", "order", "checkout", "bayar", "dibayar", "dikirim")) {
     intents.add("order");
@@ -75,8 +75,14 @@ export function detectIntents(message: string): Set<"order" | "sales" | "stats" 
   if (has("statistik", "statistic", "rekap", "jumlah pengguna", "total pengguna", "performa platform")) {
     intents.add("stats");
   }
-  if (has("stok menipis", "hampir habis", "stok tersisa", "stok sedikit", "menipis")) {
+  const wantsLowStock = has("stok menipis", "hampir habis", "stok tersisa", "stok sedikit", "menipis");
+  if (wantsLowStock) {
     intents.add("lowstock");
+  }
+  // Produk habis / out of stock — "hampir habis" bukan habis (sudah tertangani lowstock).
+  const withoutNearly = m.replace(/hampir habis/g, " ");
+  if (/(^|[^a-z])habis|out of stock|sold out|stok 0|kehabisan/.test(withoutNearly)) {
+    intents.add("outofstock");
   }
   if (has("toko", "penjual", "seller", "penjualnya", "tokonya", "siapa yang jual")) {
     intents.add("store");
@@ -354,6 +360,93 @@ async function fetchLowStock(user: SafeUser, message: string): Promise<ContextSe
   };
 }
 
+/** Produk stok habis — agar AI bisa menjawab "produk apa yang habis" dengan data. */
+async function fetchOutOfStock(user: SafeUser, message: string): Promise<ContextSection> {
+  const wantsOwn = user.role === "SELLER" && /\b(saya|toko saya|produk saya|sendiri)\b/.test(message.toLowerCase());
+
+  let storeId: string | undefined;
+  if (wantsOwn) {
+    const store = await prisma.store.findUnique({
+      where: { userId: user.id },
+      select: { id: true },
+    });
+    storeId = store?.id;
+  }
+
+  // Definisi "habis" konsisten dengan katalog: status OUT_OF_STOCK ATAU stok ≤ 0
+  // ( produk AVAILABLE dengan stok 0 juga dianggap tidak tersedia ).
+  const products = await prisma.product.findMany({
+    where: {
+      status: { not: "HIDDEN" },
+      OR: [{ status: "OUT_OF_STOCK" }, { stock: { lte: 0 } }],
+      ...(storeId ? { storeId } : {}),
+    },
+    orderBy: { name: "asc" },
+    take: 8,
+    select: {
+      name: true,
+      stock: true,
+      price: true,
+      status: true,
+      store: { select: { storeName: true } },
+    },
+  });
+
+  // Section tetap dikembalikan meski kosong — agar AI dapat menyatakan
+  // "tidak ada produk habis" berdasar data, bukan mengarang.
+  const text =
+    products.length === 0
+      ? "Tidak ada produk dengan stok habis saat ini."
+      : products
+          .map(
+            (p) =>
+              `${p.name} — stok ${p.stock} (status ${p.status}) — ${rupiah(Number(p.price))} — ${p.store.storeName}`,
+          )
+          .join("\n");
+
+  return {
+    key: "outofstock",
+    label: `Produk dengan stok habis${wantsOwn ? " (toko sendiri)" : " (katalog publik)"}`,
+    scope: wantsOwn ? "toko-sendiri" : "publik",
+    asOf: new Date().toISOString(),
+    text,
+  };
+}
+
+/**
+ * Ringkasan katalog — SELALU dijalankan agar AI bisa membedakan kondisi:
+ * katalog benar-benar kosong vs produk ada tetapi habis vs belum ada produk
+ * aktif. Definisi "tersedia" sama persis dengan pencarian katalog.
+ */
+async function fetchCatalogSummary(): Promise<ContextSection> {
+  const [total, available, unavailable, hidden] = await Promise.all([
+    prisma.product.count({ where: { status: { not: "HIDDEN" } } }),
+    prisma.product.count({ where: { status: "AVAILABLE", stock: { gt: 0 } } }),
+    prisma.product.count({
+      where: {
+        status: { not: "HIDDEN" },
+        OR: [{ status: "OUT_OF_STOCK" }, { stock: { lte: 0 } }],
+      },
+    }),
+    prisma.product.count({ where: { status: "HIDDEN" } }),
+  ]);
+
+  const lines = [
+    `Total produk non-hidden: ${total}`,
+    `Tersedia untuk dibeli (status AVAILABLE & stok > 0): ${available}`,
+    `Stok habis / tidak tersedia: ${unavailable}`,
+    `Produk tersembunyi (HIDDEN): ${hidden}`,
+  ];
+
+  return {
+    key: "catalog",
+    label: "Ringkasan katalog (hitungan produk per ketersediaan)",
+    scope: "publik",
+    asOf: new Date().toISOString(),
+    text: lines.join("\n"),
+  };
+}
+
 /** Profil toko yang relevan — info publik marketplace. */
 async function fetchStores(keywords: string[]): Promise<ContextSection | null> {
   if (keywords.length === 0) return null;
@@ -465,10 +558,12 @@ export async function buildChatContext(user: SafeUser, message: string): Promise
   const products = await searchCatalog(keywords);
 
   const jobs: (Promise<ContextSection | null> | null)[] = [];
+  jobs.push(fetchCatalogSummary()); // selalu — agar "kosong" vs "habis" tidak tertukar
   if (intents.has("order")) jobs.push(fetchOrders(user));
   if (intents.has("sales")) jobs.push(fetchSales(user));
   if (intents.has("stats")) jobs.push(fetchStats(user));
   if (intents.has("lowstock")) jobs.push(fetchLowStock(user, message));
+  if (intents.has("outofstock")) jobs.push(fetchOutOfStock(user, message));
   if (intents.has("store")) jobs.push(fetchStores(keywords));
   if (intents.has("account")) jobs.push(fetchAccount(user));
 
