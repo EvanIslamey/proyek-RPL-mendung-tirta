@@ -37,7 +37,38 @@ export type AiProduct = {
   categoryName: string;
   rating: number;
   ratingCount: number;
+  /** Status produk (AVAILABLE / OUT_OF_STOCK / HIDDEN) bila tersedia dari query. */
+  status?: string;
 };
+
+/** Baris hasil query mentah → AiProduct (dipakai searchCatalog & findFocusProducts). */
+type ProductRow = {
+  id: string;
+  name: string;
+  price: string | number;
+  stock: number;
+  image: string | null;
+  storeName: string;
+  categoryName: string;
+  rating: string | number;
+  ratingCount: string | number;
+  status: string;
+};
+
+function toAiProduct(r: ProductRow): AiProduct {
+  return {
+    id: r.id,
+    name: r.name,
+    price: Number(r.price),
+    stock: r.stock,
+    image: r.image,
+    storeName: r.storeName,
+    categoryName: r.categoryName,
+    rating: Math.round(Number(r.rating) * 10) / 10,
+    ratingCount: Number(r.ratingCount),
+    status: r.status,
+  };
+}
 
 export type AiChatResult = {
   reply: string;
@@ -71,23 +102,12 @@ export async function searchCatalog(keywords: string[]): Promise<AiProduct[]> {
   const match = Prisma.join(conds, " OR ");
 
   // Cari produk yang match keyword
-  const rows = await prisma.$queryRaw<
-    {
-      id: string;
-      name: string;
-      price: string | number;
-      stock: number;
-      image: string | null;
-      storeName: string;
-      categoryName: string;
-      rating: number;
-      ratingCount: number;
-    }[]
-  >(Prisma.sql`
+  const rows = await prisma.$queryRaw<ProductRow[]>(Prisma.sql`
     SELECT p.id, p.name, p.price::float AS price, p.stock, p.image,
            s."storeName" AS "storeName", c.name AS "categoryName",
            COALESCE(r."ratingAvg", 0)::float AS rating,
-           COALESCE(r."ratingCount", 0)::int AS "ratingCount"
+           COALESCE(r."ratingCount", 0)::int AS "ratingCount",
+           p.status::text AS status
     FROM "Product" p
     JOIN "Store" s ON s.id = p."storeId" AND s."isActive" = true
     JOIN "Category" c ON c.id = p."categoryId"
@@ -103,23 +123,12 @@ export async function searchCatalog(keywords: string[]): Promise<AiProduct[]> {
 
   // Jika tidak ada produk yang match keyword, kembalikan produk AVAILABLE terbaru
   if (rows.length === 0) {
-    const fallbackRows = await prisma.$queryRaw<
-      {
-        id: string;
-        name: string;
-        price: string | number;
-        stock: number;
-        image: string | null;
-        storeName: string;
-        categoryName: string;
-        rating: number;
-        ratingCount: number;
-      }[]
-    >(Prisma.sql`
+    const fallbackRows = await prisma.$queryRaw<ProductRow[]>(Prisma.sql`
       SELECT p.id, p.name, p.price::float AS price, p.stock, p.image,
              s."storeName" AS "storeName", c.name AS "categoryName",
              COALESCE(r."ratingAvg", 0)::float AS rating,
-             COALESCE(r."ratingCount", 0)::int AS "ratingCount"
+             COALESCE(r."ratingCount", 0)::int AS "ratingCount",
+             p.status::text AS status
       FROM "Product" p
       JOIN "Store" s ON s.id = p."storeId" AND s."isActive" = true
       JOIN "Category" c ON c.id = p."categoryId"
@@ -131,30 +140,44 @@ export async function searchCatalog(keywords: string[]): Promise<AiProduct[]> {
       ORDER BY p."createdAt" DESC
       LIMIT 8
     `);
-    return fallbackRows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      price: Number(r.price),
-      stock: r.stock,
-      image: r.image,
-      storeName: r.storeName,
-      categoryName: r.categoryName,
-      rating: Math.round((r.rating ?? 0) * 10) / 10,
-      ratingCount: r.ratingCount ?? 0,
-    }));
+    return fallbackRows.map(toAiProduct);
   }
 
-  return rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    price: Number(r.price),
-    stock: r.stock,
-    image: r.image,
-    storeName: r.storeName,
-    categoryName: r.categoryName,
-    rating: Math.round((r.rating ?? 0) * 10) / 10,
-    ratingCount: r.ratingCount ?? 0,
-  }));
+  return rows.map(toAiProduct);
+}
+
+/**
+ * Fokus produk: cari produk yang NAMANYA mengandung keyword (toleran ILIKE,
+ * tanpa peduli status — boleh OUT_OF_STOCK agar bisa menjawab "stok habis").
+ * Dipakai untuk menjawab pertanyaan SATU produk (mis. "berapa stok ikan kerapu?")
+ * tanpa menampilkan ringkasan seluruh katalog.
+ */
+export async function findFocusProducts(keywords: string[]): Promise<AiProduct[]> {
+  if (keywords.length === 0) return [];
+
+  const conds = keywords.map((kw) => Prisma.sql`p.name ILIKE ${"%" + kw + "%"}`);
+  const match = Prisma.join(conds, " OR ");
+
+  const rows = await prisma.$queryRaw<ProductRow[]>(Prisma.sql`
+    SELECT p.id, p.name, p.price::float AS price, p.stock, p.image,
+           s."storeName" AS "storeName", c.name AS "categoryName",
+           COALESCE(r."ratingAvg", 0)::float AS rating,
+           COALESCE(r."ratingCount", 0)::int AS "ratingCount",
+           p.status::text AS status
+    FROM "Product" p
+    JOIN "Store" s ON s.id = p."storeId" AND s."isActive" = true
+    JOIN "Category" c ON c.id = p."categoryId"
+    LEFT JOIN (
+      SELECT "productId", AVG(rating) AS "ratingAvg", COUNT(*) AS "ratingCount"
+      FROM "Review" GROUP BY "productId"
+    ) r ON r."productId" = p.id
+    WHERE p.status <> 'HIDDEN'
+      AND (${match})
+    ORDER BY (p.status = 'AVAILABLE' AND p.stock > 0) DESC, p.name ASC
+    LIMIT 6
+  `);
+
+  return rows.map(toAiProduct);
 }
 
 /** Format daftar produk untuk disertakan ke prompt model. */
@@ -202,11 +225,25 @@ function contextForPrompt(
   sections: ContextSection[],
   products: AiProduct[],
   contextProducts: AiProduct[],
+  focus: AiProduct | null,
+  focusCandidates: AiProduct[],
 ): string {
   const parts = sections.map(
     (s) =>
       `DATA KONTEKS — ${s.label} (scope: ${s.scope}; diambil ${new Date(s.asOf).toLocaleString("id-ID")}):\n${s.text}`,
   );
+  if (focus) {
+    parts.push(
+      "PRODUK FOKUS (paling cocok dengan pertanyaan user — prioritaskan menjawab tentang produk ini):\n" +
+        catalogForPrompt([focus]),
+    );
+  }
+  if (focusCandidates.length >= 2) {
+    parts.push(
+      "KANDIDAT PRODUK (beberapa cocok — bila pertanyaan user ambigu, daftarkan pilihan lalu minta user memilih):\n" +
+        catalogForPrompt(focusCandidates),
+    );
+  }
   if (contextProducts.length > 0) {
     parts.push(
       "PRODUK DARI KONTEKS PERCAKAPAN SEBELUMNYA (divalidasi ulang dari database saat ini — harga/stok terkini):\n" +
@@ -230,23 +267,127 @@ function buildSources(sections: ContextSection[], products: AiProduct[], generat
   return sources;
 }
 
+/** Label status produk untuk jawaban fokus. */
+function statusLabel(p: AiProduct): string {
+  if (p.status === "OUT_OF_STOCK" || p.stock <= 0) return "Habis / tidak tersedia";
+  if (p.status === "HIDDEN") return "Tidak ditampilkan di katalog";
+  return "Tersedia";
+}
+
 /**
- * Jawaban fallback (tanpa model LLM / provider gagal) — tetap berbasis data
- * nyata dari database: section konteks per-peran dulu, baru daftar produk.
+ * Jawaban spesifik untuk SATU produk (hasil query DB terkini) — dipakai untuk
+ * pertanyaan seperti "berapa stok ikan kerapu?" agar tidak menampilkan
+ * ringkasan seluruh katalog.
  */
-function fallbackResult(opts: {
+function focusedReply(p: AiProduct, message: string): string {
+  const habis = p.stock <= 0 || p.status === "OUT_OF_STOCK";
+  const lines = [
+    `${p.name} — data aktual dari database:`,
+    `• Harga: Rp${p.price.toLocaleString("id-ID")}`,
+    `• Stok: ${p.stock}`,
+    `• Status: ${statusLabel(p)}`,
+    `• Toko: ${p.storeName}`,
+    `• Kategori: ${p.categoryName}`,
+  ];
+  if (habis) {
+    lines.push("", "Produk ditemukan, tetapi stoknya habis — belum bisa dibeli.");
+  } else {
+    lines.push("", "Tersedia untuk dibeli — buka /products untuk detail & ulasan pembeli.");
+  }
+  if (/ukuran|varian|size|warna/.test(message.toLowerCase())) {
+    lines.push("Catatan: detail ukuran/varian belum tersedia di data katalog.");
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Jawaban fallback (tanpa model LLM / provider gagal / API key tidak ada) —
+ * tetap berbasis data nyata dari database, dengan urutan prioritas:
+ * 1. fokus satu produk → jawaban spesifik (bukan ringkasan katalog)
+ * 2. pertanyaan lanjutan tanpa referensi jelas → minta klarifikasi
+ * 3. beberapa kandidat produk ambigu → minta klarifikasi
+ * 4. pertanyaan stok habis/menipis → daftar status stok saja
+ * 5. section konteks (akun/pesanan/statistik/…) + daftar produk bila relevan
+ * 6. tidak ada data yang cocok → saran kata kunci
+ * 7. daftar produk pencarian umum
+ */
+export function fallbackResult(opts: {
   message: string;
   products: AiProduct[];
   sections: ContextSection[];
   contextProducts?: AiProduct[];
+  focus?: AiProduct | null;
+  focusCandidates?: AiProduct[];
+  ambiguousFollowUp?: boolean;
   generatedAt: string;
 }): AiChatResult {
   const allProducts = [
     ...opts.products,
     ...(opts.contextProducts ?? []).filter((c) => !opts.products.some((p) => p.id === c.id)),
   ];
-  const sources = buildSources(opts.sections, allProducts, opts.generatedAt);
 
+  // 1. Fokus satu produk — jawab spesifik, tanpa ringkasan katalog.
+  if (opts.focus) {
+    return {
+      reply: focusedReply(opts.focus, opts.message),
+      products: [opts.focus],
+      sources: buildSources([], [opts.focus], opts.generatedAt),
+      generatedAt: opts.generatedAt,
+      source: "fallback",
+    };
+  }
+
+  // 2. Pertanyaan lanjutan ("berapa harganya?") tanpa konteks produk → klarifikasi,
+  //    jangan menampilkan dump katalog.
+  if (opts.ambiguousFollowUp) {
+    return {
+      reply:
+        "Maksud Anda produk yang mana? Sebutkan nama produknya (mis. \"ikan kerapu\", \"umpan minnow\") " +
+        'atau tanyakan "apa saja produk yang tersedia?" untuk melihat daftar katalog lengkap.',
+      products: [],
+      sources: [],
+      generatedAt: opts.generatedAt,
+      source: "fallback",
+    };
+  }
+
+  // 3. Nama produk ambigu — beberapa kandidat cocok → minta klarifikasi.
+  if (opts.focusCandidates && opts.focusCandidates.length >= 2) {
+    const list = opts.focusCandidates
+      .slice(0, 5)
+      .map(
+        (p, i) =>
+          `${i + 1}. ${p.name} — Rp${p.price.toLocaleString("id-ID")} (stok ${p.stock}, ${statusLabel(p)})`,
+      )
+      .join("\n");
+    return {
+      reply:
+        `Ada beberapa produk yang cocok dengan kata kunci Anda:\n\n${list}\n\n` +
+        "Produk mana yang Anda maksud? Sebutkan namanya agar saya berikan detail lengkap.",
+      products: opts.focusCandidates.slice(0, 5),
+      sources: buildSources([], opts.focusCandidates.slice(0, 5), opts.generatedAt),
+      generatedAt: opts.generatedAt,
+      source: "fallback",
+    };
+  }
+
+  // 4. Pertanyaan stok habis/menipis — tampilkan daftar status stok saja
+  //    (tanpa membanjiri dengan daftar produk tersedia).
+  const stockSection = opts.sections.find((s) => s.key === "outofstock" || s.key === "lowstock");
+  if (stockSection) {
+    const catalogCounts = opts.sections.find((s) => s.key === "catalog");
+    const shown = catalogCounts ? [stockSection, catalogCounts] : [stockSection];
+    const body = shown.map((s) => `${s.label}:\n${s.text}`).join("\n\n");
+    return {
+      reply: `Berikut data stok terkini dari database:\n\n${body}`.slice(0, 1600),
+      products: [],
+      sources: buildSources(shown, [], opts.generatedAt),
+      generatedAt: opts.generatedAt,
+      source: "fallback",
+    };
+  }
+
+  // 5. Section konteks (akun, pesanan, statistik, layanan, katalog umum…).
   if (opts.sections.length > 0) {
     const body = opts.sections.map((s) => `${s.label}:\n${s.text}`).join("\n\n");
     // Sertakan daftar produk bila ada — agar mode tanpa AI tetap bisa
@@ -265,16 +406,17 @@ function fallbackResult(opts: {
         : "";
     return {
       reply:
-        "Berikut data terkini dari aplikasi (mode katalog — tanpa model AI):\n\n" +
+        "Berikut data terkini dari aplikasi:\n\n" +
         body.slice(0, 1600) +
         productList.slice(0, 600),
       products: allProducts.slice(0, 5),
-      sources,
+      sources: buildSources(opts.sections, allProducts, opts.generatedAt),
       generatedAt: opts.generatedAt,
       source: "fallback",
     };
   }
 
+  // 6. Tidak ada data yang cocok.
   if (allProducts.length === 0) {
     return {
       reply:
@@ -282,12 +424,13 @@ function fallbackResult(opts: {
         "Coba kata kunci lain (mis. \"joran\", \"umpan\", \"ikan segar\", \"status pesanan\") " +
         "atau telusuri langsung katalog di /products.",
       products: [],
-      sources,
+      sources: [],
       generatedAt: opts.generatedAt,
       source: "fallback",
     };
   }
 
+  // 7. Daftar produk pencarian umum.
   const lines = allProducts
     .slice(0, 5)
     .map(
@@ -302,7 +445,7 @@ function fallbackResult(opts: {
       lines +
       "\n\nBuka halaman produk untuk detail lengkap dan ulasan pembeli.",
     products: allProducts.slice(0, 5),
-    sources,
+    sources: buildSources([], allProducts.slice(0, 5), opts.generatedAt),
     generatedAt: opts.generatedAt,
     source: "fallback",
   };
@@ -311,7 +454,10 @@ function fallbackResult(opts: {
 /**
  * Hasilkan balasan asisten: coba provider AI dulu, fallback ke konteks DB.
  * Tidak pernah melempar — kegagalannya sendiri jatuh ke fallback.
+ * Error provider dicatat AMAN (hanya pesan & status — tanpa API key).
  */
+let noKeyLogged = false;
+
 export async function generateReply(opts: {
   message: string;
   history: AiChatMessage[];
@@ -319,28 +465,47 @@ export async function generateReply(opts: {
   sections: ContextSection[];
   /** Produk riwayat percakapan (divalidasi ulang dari DB oleh pemanggil). */
   contextProducts?: AiProduct[];
+  /** Produk fokus pertanyaan (cocok 1 nama) — dari findFocusProducts/konteks. */
+  focus?: AiProduct | null;
+  /** Beberapa kandidat cocok → minta klarifikasi. */
+  focusCandidates?: AiProduct[];
+  /** Pertanyaan lanjutan tanpa referensi jelas → minta klarifikasi. */
+  ambiguousFollowUp?: boolean;
 }): Promise<AiChatResult> {
   const generatedAt = new Date().toISOString();
   const contextProducts = opts.contextProducts ?? [];
+  const focus = opts.focus ?? null;
+  const focusCandidates = opts.focusCandidates ?? [];
   const fallback = () => fallbackResult({ ...opts, generatedAt });
 
   // Union untuk validasi marker [produk:id] & label sumber katalog.
-  const allProducts = [
-    ...opts.products,
-    ...contextProducts.filter((c) => !opts.products.some((p) => p.id === c.id)),
-  ];
+  const allProducts: AiProduct[] = [];
+  for (const p of [...opts.products, ...contextProducts, ...(focus ? [focus] : []), ...focusCandidates]) {
+    if (!allProducts.some((x) => x.id === p.id)) allProducts.push(p);
+  }
 
   const apiKey = process.env.AI_API_KEY?.trim();
-  if (!apiKey) return fallback();
+  if (!apiKey) {
+    // Dicatat sekali — TANPA menampilkan key (kondisi: AI belum dikonfigurasi).
+    if (!noKeyLogged) {
+      noKeyLogged = true;
+      console.info("[ai] AI_API_KEY belum dikonfigurasi — memakai jawaban fallback berbasis data.");
+    }
+    return fallback();
+  }
 
   const baseUrl = (process.env.AI_BASE_URL?.trim() || "https://api.openai.com/v1").replace(/\/+$/, "");
   const model = process.env.AI_MODEL?.trim() || "gpt-4o-mini";
+  const timeoutMs = (() => {
+    const n = Number(process.env.AI_TIMEOUT_MS);
+    return Number.isFinite(n) && n >= 1_000 && n <= 120_000 ? n : 30_000;
+  })();
 
   const messages = [
     { role: "system" as const, content: SYSTEM_PROMPT },
     {
       role: "system" as const,
-      content: `DATA DARI DATABASE:\n${contextForPrompt(opts.sections, opts.products, contextProducts)}`,
+      content: `DATA DARI DATABASE:\n${contextForPrompt(opts.sections, opts.products, contextProducts, focus, focusCandidates)}`,
     },
     ...opts.history.slice(-8),
     { role: "user" as const, content: opts.message },
@@ -350,10 +515,13 @@ export async function generateReply(opts: {
     const res = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, messages, temperature: 0.2, max_tokens: 1000 }),
-      signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({ model, messages, temperature: 0.2, max_tokens: 1600 }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!res.ok) throw new Error(`provider HTTP ${res.status}`);
+    if (!res.ok) {
+      const body = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 160);
+      throw new Error(`provider HTTP ${res.status}${body ? ` — ${body}` : ""}`);
+    }
     const data = (await res.json()) as {
       choices?: { message?: { content?: string } }[];
     };
@@ -375,7 +543,10 @@ export async function generateReply(opts: {
       .replace(/\n{3,}/g, "\n\n")
       .trim();
 
-    if (!reply) return fallback();
+    if (!reply) {
+      console.warn(`[ai] provider ${model} mengembalikan jawaban kosong → fallback.`);
+      return fallback();
+    }
     return {
       reply,
       products: mentioned.map((id) => allowed.get(id)!).slice(0, 5),
@@ -383,8 +554,11 @@ export async function generateReply(opts: {
       generatedAt,
       source: "ai",
     };
-  } catch {
-    // Provider gagal/timeout → tampilkan jawaban fallback apa adanya.
+  } catch (err) {
+    // Provider gagal (timeout/jaringan/HTTP error) → catat AMAN (tanpa key),
+    // lalu tampilkan jawaban fallback berbasis data.
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    console.warn(`[ai] provider ${model} gagal → fallback. ${detail}`);
     return fallback();
   }
 }

@@ -18,7 +18,7 @@ Prinsip keamanan (A3/A4):
 
 import { Prisma } from "../../prisma/generated/client";
 import { prisma } from "./prisma";
-import { searchCatalog, extractKeywords, type AiProduct } from "./ai";
+import { searchCatalog, findFocusProducts, extractKeywords, type AiProduct } from "./ai";
 import type { SafeUser } from "./auth";
 
 export type ContextScope = "publik" | "milik-sendiri" | "toko-sendiri" | "admin";
@@ -46,6 +46,12 @@ export type ChatContext = {
   sections: ContextSection[];
   /** Produk dari riwayat percakapan (divalidasi ulang dari DB). */
   contextProducts: AiProduct[];
+  /** Produk fokus (satu nama cocok / konteks lanjutan) — divalidasi dari DB. */
+  focus: AiProduct | null;
+  /** ≥2 nama produk cocok dengan keyword → jawab dengan klarifikasi. */
+  focusCandidates: AiProduct[];
+  /** Pertanyaan lanjutan ("berapa harganya?") tanpa referensi jelas → klarifikasi. */
+  ambiguousFollowUp: boolean;
   generatedAt: string;
 };
 
@@ -693,13 +699,15 @@ async function fetchProductsByIds(ids: string[]): Promise<AiProduct[]> {
         categoryName: r.category.name,
         rating: Math.round(avg * 10) / 10,
         ratingCount: r.reviews.length,
+        status: r.status,
       };
     });
 }
 
 /**
  * Susun konteks chatbot untuk satu pertanyaan:
- * pencarian katalog (hanya bila relevan dengan topik produk) + section
+ * pencarian katalog (hanya bila relevan dengan topik produk) + fokus produk
+ * (untuk pertanyaan SATU produk — tanpa ringkasan katalog) + section
  * sesuai intent & PERAN sesi login + produk dari konteks percakapan
  * sebelumnya (divalidasi ulang dari DB — bukan ingatan model).
  * Melempar bila DB gagal → route menangkap dan menjawab dengan pesan
@@ -728,8 +736,34 @@ export async function buildChatContext(
   // divalidasi ulang dari DB — harga/stok terkini, bukan ingatan model).
   const contextProducts = await fetchProductsByIds(opts?.contextProductIds ?? []);
 
+  // Fokus produk: nama produk yang cocok dengan keyword (toleran ILIKE).
+  // - 1 cocok → fokus (jawab spesifik, bukan ringkasan seluruh katalog)
+  // - ≥2 cocok → ambigu → minta klarifikasi
+  const focusMatches = catalogRelevant ? await findFocusProducts(keywords) : [];
+  const focus = focusMatches.length === 1 ? focusMatches[0] : null;
+  const focusCandidates = focus ? [] : focusMatches;
+  // Pertanyaan lanjutan ("berapa harganya?") dengan tepat 1 produk di riwayat
+  // → fokus ke produk riwayat (stok/harga tetap divalidasi ulang dari DB).
+  let focusProduct: AiProduct | null = focus;
+  if (!focusProduct && focusCandidates.length === 0 && contextProducts.length === 1 && intents.has("product")) {
+    focusProduct = contextProducts[0];
+  }
+  // Pertanyaan lanjutan tanpa referensi jelas (tanpa nama & tanpa konteks)
+  // → jangan tampilkan dump katalog — minta klarifikasi.
+  const ambiguousFollowUp =
+    catalogRelevant &&
+    !focusProduct &&
+    focusCandidates.length === 0 &&
+    contextProducts.length === 0 &&
+    /\bharganya\b|\bstoknya\b|\bmasih ada\b|detailnya|yang tadi|\bukuran lain\b|\bvarian lain\b/i.test(message) &&
+    !/\bapa saja\b|\bkatalog\b|\bdaftar\b|semua produk|produk yang (?:tersedia|ada)|produk apa/i.test(message);
+
   const jobs: (Promise<ContextSection | null> | null)[] = [];
-  if (catalogRelevant) jobs.push(fetchCatalogSummary()); // "kosong" vs "habis" tidak tertukar
+  // Ringkasan katalog hanya bila TIDAK sedang fokus ke produk tertentu
+  // (pertanyaan satu produk tidak perlu ringkasan seluruh katalog).
+  if (catalogRelevant && !focusProduct && focusCandidates.length === 0 && !ambiguousFollowUp) {
+    jobs.push(fetchCatalogSummary()); // "kosong" vs "habis" tidak tertukar
+  }
   if (intents.has("order")) jobs.push(fetchOrders(user));
   if (intents.has("sales")) jobs.push(fetchSales(user));
   if (intents.has("stats")) jobs.push(fetchStats(user));
@@ -743,5 +777,13 @@ export async function buildChatContext(
 
   const sections = (await Promise.all(jobs)).filter((s): s is ContextSection => s !== null);
 
-  return { products, sections, contextProducts, generatedAt: new Date().toISOString() };
+  return {
+    products,
+    sections,
+    contextProducts,
+    focus: focusProduct,
+    focusCandidates,
+    ambiguousFollowUp,
+    generatedAt: new Date().toISOString(),
+  };
 }

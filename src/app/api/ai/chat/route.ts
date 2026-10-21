@@ -89,13 +89,16 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // 2. Balasan (AI bila key ada, fallback berbasis data bila tidak).
+    // 2. Balasan (AI bila provider berhasil, fallback berbasis data bila tidak).
     const result = await generateReply({
       message,
       history,
       products: context.products,
       sections: context.sections,
       contextProducts: context.contextProducts,
+      focus: context.focus,
+      focusCandidates: context.focusCandidates,
+      ambiguousFollowUp: context.ambiguousFollowUp,
     });
 
     return Response.json(result);
