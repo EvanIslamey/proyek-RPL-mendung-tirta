@@ -18,7 +18,13 @@ Prinsip keamanan (A3/A4):
 
 import { Prisma } from "../../prisma/generated/client";
 import { prisma } from "./prisma";
-import { searchCatalog, findFocusProducts, extractKeywords, type AiProduct } from "./ai";
+import {
+  searchCatalog,
+  findFocusProducts,
+  extractKeywords,
+  parsePriceFilter,
+  type AiProduct,
+} from "./ai";
 import type { SafeUser } from "./auth";
 
 export type ContextScope = "publik" | "milik-sendiri" | "toko-sendiri" | "admin";
@@ -29,6 +35,7 @@ export type ContextSection = {
     | "sales"
     | "stats"
     | "market"
+    | "count"
     | "lowstock"
     | "outofstock"
     | "store"
@@ -80,11 +87,81 @@ export type ChatIntent =
   | "order"
   | "sales"
   | "stats"
+  | "count" // pertanyaan hitungan per entitas (jumlah penjual/pembeli/…) — prioritas atas "stats"
   | "lowstock"
   | "outofstock"
   | "store"
   | "account"
   | "appinfo";
+
+/** Jenis hitungan tunggal yang ditanyakan user (spesifik > ringkasan umum). */
+export type CountKind =
+  | "seller" // akun penjual (role SELLER)
+  | "buyer"
+  | "admin"
+  | "user" // seluruh pengguna/akun
+  | "store" // toko terdaftar (tabel Store — bukan akun penjual)
+  | "totalProducts"
+  | "availableProducts"
+  | "outOfStockProducts"
+  | "orders";
+
+/**
+ * Deteksi pertanyaan HITUNGAN tunggal — SATU-SATUNYA tempat pola bahasa
+ * hitungan didefinisikan (dipakai detectIntents & buildChatContext — tidak
+ * ada aturan duplikat yang bisa saling bertentangan).
+ *
+ * Murni (tanpa DB/AI), menangani variasi bahasa Indonesia:
+ * "berapa jumlah penjual?", "ada berapa penjual?", "jumlah seller berapa?",
+ * "berapa seller yang terdaftar?", dst. "Ada berapa toko terdaftar?" diarahkan
+ * ke hitungan TOKO (tabel Store) — bukan akun penjual — sesuai skema database.
+ *
+ * Return: daftar jenis hitungan (bisa >1 bila user menanyakan beberapa
+ * entitas dalam satu pertanyaan); kosong bila bukan pertanyaan hitungan.
+ */
+export function detectCountQuery(message: string): CountKind[] {
+  const m = message.toLowerCase().replace(/[^\w\s-]/g, " ");
+  // Penanda pertanyaan hitungan — tanpa ini BUKAN pertanyaan jumlah.
+  const asksCount = /\bberapa\b|\bseberapa\b|\bjumlah\b|\bbanyak\b|\bsebanyak\b|\btotal\b/.test(m);
+  if (!asksCount) return [];
+
+  // Hitungan GLOBAL tidak berlaku untuk pertanyaan milik sendiri
+  // ("berapa akun saya?" → profil akun, bukan total pengguna platform).
+  const personal = /\bsaya\b|\baku\b|\bsendiri\b/.test(m);
+  // "apa saja/daftar/sebutkan" = minta DAFTAR, bukan angka.
+  const wantsList = /\bapa saja\b|\bdaftar\b|\bsebutkan\b|\bmana saja\b|\bsebut\b/.test(m);
+  const kinds = new Set<CountKind>();
+
+  if (!personal) {
+    // \bpenjual\b tidak cocok dengan "penjualan" (pertanyaan omzet → intent sales).
+    if (/\bpenjual(?:nya)?\b|\bsellers?\b/.test(m)) kinds.add("seller");
+    if (/\bpembeli(?:nya)?\b|\bbuyers?\b/.test(m)) kinds.add("buyer");
+    if (/\badmins?\b|\badministrator\b/.test(m)) kinds.add("admin");
+    if (/\bpengguna\b|\busers?\b|\baccounts?\b|\bakun\b/.test(m)) kinds.add("user");
+    if (/\btoko(?:nya)?\b|\bstores?\b/.test(m)) kinds.add("store");
+  }
+
+  // Hitungan produk — hanya bila bukan minta daftar/atribut satu produk.
+  const productEntity = /\bproduk(?:nya)?\b|\bbarang\b|\bitem\b/.test(m);
+  const singleProductAttr = /\bulasan\b|\breviews?\b|\brating\b|\bharga\b|\bkomentar\b|\bmenipis\b|hampir habis/.test(m);
+  if (productEntity && !wantsList && !singleProductAttr) {
+    const oos = /\bhabis\b|out of stock|sold out|\btidak tersedia\b|\bkosong\b/.test(m);
+    const avail = (/\btersedia\b|\bready\b|\bavailable\b|ada untuk dibeli/.test(m) && !/\btidak tersedia\b/.test(m));
+    if (avail && !oos) kinds.add("availableProducts");
+    else if (oos) kinds.add("outOfStockProducts");
+    else kinds.add("totalProducts");
+  }
+
+  // Pesanan — cakupan mengikuti peran (milik sendiri/toko/marketplace).
+  if (/\bpesanan\b|\borders?\b|\btransaksi\b/.test(m)) kinds.add("orders");
+
+  // Urutan deterministik (untuk format jawaban bila >1).
+  const order: CountKind[] = [
+    "seller", "buyer", "admin", "user", "store",
+    "totalProducts", "availableProducts", "outOfStockProducts", "orders",
+  ];
+  return order.filter((k) => kinds.has(k));
+}
 
 /**
  * Deteksi jenis pertanyaan (murni, tanpa AI — bisa diuji unit test).
@@ -115,13 +192,12 @@ export function detectIntents(message: string): Set<ChatIntent> {
   if (has("penjualan", "omzet", "pendapatan", "revenue", "terjual", "penghasilan", "laku")) {
     intents.add("sales");
   }
-  // Statistik marketplace (jawaban penuh khusus ADMIN)
+  // Statistik marketplace (ringkasan UMUM — hanya bila user meminta rekap/
+  // statistik; pertanyaan hitungan per entitas masuk intent "count", BUKAN sini)
   if (
     has(
-      "statistik", "statistic", "rekap", "jumlah pengguna", "total pengguna",
-      "performa platform", "jumlah penjual", "jumlah pembeli", "total penjual",
-      "total pembeli", "berapa penjual", "berapa pembeli", "banyak penjual",
-      "banyak pembeli", "jumlah toko", "berapa toko",
+      "statistik", "statistic", "rekap", "performa platform",
+      "performa marketplace", "ringkasan statistik",
     )
   ) {
     intents.add("stats");
@@ -163,6 +239,11 @@ export function detectIntents(message: string): Set<ChatIntent> {
     )
   ) {
     intents.add("appinfo");
+  }
+  // Pertanyaan hitungan per entitas ("berapa jumlah penjual?" dst.) —
+  // prioritas di atas ringkasan statistik umum (lihat detectCountQuery).
+  if (detectCountQuery(message).length > 0) {
+    intents.add("count");
   }
   return intents;
 }
@@ -400,6 +481,211 @@ async function fetchMarketReach(user: SafeUser, message: string): Promise<Contex
     scope: "publik",
     asOf: new Date().toISOString(),
     text: lines.filter(Boolean).join("\n"),
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Hitungan per intent — PENGAMBILAN DATA dipisah dari FORMAT JAWABAN. */
+/* ------------------------------------------------------------------ */
+
+/** Label status pesanan (Indonesia) untuk jawaban hitungan pesanan. */
+const ORDER_STATUS_LABEL = {
+  PENDING: "Menunggu Pembayaran",
+  PROCESSING: "Diproses",
+  SHIPPED: "Dikirim",
+  READY_FOR_PICKUP: "Siap Diambil",
+  COMPLETED: "Selesai",
+  CANCELLED: "Dibatalkan",
+} as const;
+
+type OrderStatusValue = keyof typeof ORDER_STATUS_LABEL;
+
+/** Frasa Indonesia → status pesanan (undefined = semua status / tanpa filter). */
+function parseOrderStatus(message: string): OrderStatusValue | undefined {
+  const m = message.toLowerCase();
+  if (/dibatalkan|\bbatal\b|cancel/.test(m)) return "CANCELLED";
+  if (/\bselesai\b|completed/.test(m)) return "COMPLETED";
+  if (/siap diambil|ready.for.pickup/.test(m)) return "READY_FOR_PICKUP";
+  if (/\bdikirim\b|shipped|pengiriman/.test(m)) return "SHIPPED";
+  if (/diproses|processing/.test(m)) return "PROCESSING";
+  if (/menunggu|pending|belum (?:dibayar|bayar)/.test(m)) return "PENDING";
+  return undefined;
+}
+
+/**
+ * Ambil SATU nilai hitungan aktual dari database sesuai intent & PERAN SESI.
+ * Pemisahan data dari format: fungsi ini hanya mengembalikan angka.
+ *
+ * - angka = nilai nyata dari DB (0 sah bila memang kosong);
+ * - null = peran tidak berwenang melihat (BUKAN nol — jangan samakan);
+ * - melempar bila query gagal → route menjawab "layanan data tidak tersedia"
+ *   (error TIDAK PERNAH diubah menjadi angka 0).
+ *
+ * Definisi entitas: "penjual" = akun role SELLER; "toko" = tabel Store;
+ * "produk tersedia" = status AVAILABLE & stok > 0 (sama dengan katalog);
+ * "habis" = non-hidden dan (OUT_OF_STOCK ATAU stok ≤ 0).
+ */
+export async function queryCountData(
+  user: SafeUser,
+  kind: CountKind,
+  message: string,
+): Promise<number | null> {
+  switch (kind) {
+    case "seller":
+      return prisma.user.count({ where: { role: "SELLER" } });
+    case "buyer":
+      // Data internal platform — sama dengan model otorisasi fetchStats.
+      return user.role === "ADMIN" ? prisma.user.count({ where: { role: "BUYER" } }) : null;
+    case "admin":
+      return user.role === "ADMIN" ? prisma.user.count({ where: { role: "ADMIN" } }) : null;
+    case "user":
+      return user.role === "ADMIN" ? prisma.user.count() : null;
+    case "store":
+      return prisma.store.count({
+        where: /\baktif\b/.test(message.toLowerCase()) ? { isActive: true } : {},
+      });
+    case "totalProducts":
+      return prisma.product.count({ where: { status: { not: "HIDDEN" } } });
+    case "availableProducts":
+      return prisma.product.count({ where: { status: "AVAILABLE", stock: { gt: 0 } } });
+    case "outOfStockProducts":
+      return prisma.product.count({
+        where: {
+          status: { not: "HIDDEN" },
+          OR: [{ status: "OUT_OF_STOCK" }, { stock: { lte: 0 } }],
+        },
+      });
+    case "orders": {
+      const status = parseOrderStatus(message);
+      if (user.role === "BUYER") {
+        return prisma.order.count({ where: { buyerId: user.id, ...(status ? { status } : {}) } });
+      }
+      if (user.role === "SELLER") {
+        const store = await prisma.store.findUnique({
+          where: { userId: user.id },
+          select: { id: true },
+        });
+        // Belum punya toko → null (bukan nol karangan).
+        if (!store) return null;
+        return prisma.order.count({
+          where: {
+            orderItems: { some: { product: { storeId: store.id } } },
+            ...(status ? { status } : {}),
+          },
+        });
+      }
+      return prisma.order.count({ where: { ...(status ? { status } : {}) } });
+    }
+  }
+}
+
+/**
+ * Format jawaban deterministik per intent — HANYA angka yang diminta,
+ * tanpa menambahkan statistik lain (bukan ringkasan marketplace).
+ */
+export function formatCountAnswer(
+  kind: CountKind,
+  value: number | null,
+  message: string,
+  userRole: SafeUser["role"],
+): string {
+  const m = message.toLowerCase();
+  if (value === null) {
+    switch (kind) {
+      case "buyer":
+        return "Jumlah pembeli adalah data statistik internal platform — hanya tersedia untuk admin.";
+      case "admin":
+        return "Jumlah admin adalah data statistik internal platform — hanya tersedia untuk admin.";
+      case "user":
+        return "Jumlah pengguna adalah data statistik internal platform — hanya tersedia untuk admin.";
+      case "orders":
+        return "Toko Anda belum terdaftar — data pesanan toko tidak dapat diambil.";
+      default:
+        return "Data ini tidak tersedia untuk Anda.";
+    }
+  }
+  const n = value.toLocaleString("id-ID");
+  switch (kind) {
+    case "seller":
+      return `Saat ini terdapat ${n} penjual terdaftar di Mendung Tirta.`;
+    case "buyer":
+      return `Saat ini terdapat ${n} pembeli terdaftar di Mendung Tirta.`;
+    case "admin":
+      return `Saat ini terdapat ${n} admin terdaftar di Mendung Tirta.`;
+    case "user":
+      return `Saat ini terdapat ${n} pengguna terdaftar di Mendung Tirta.`;
+    case "store":
+      return /\baktif\b/.test(m)
+        ? `Saat ini terdapat ${n} toko aktif di Mendung Tirta.`
+        : `Saat ini terdapat ${n} toko terdaftar di Mendung Tirta.`;
+    case "totalProducts":
+      return `Saat ini terdapat ${n} produk terdaftar di katalog Mendung Tirta.`;
+    case "availableProducts":
+      return value === 0
+        ? "Belum ada produk yang tersedia untuk dibeli saat ini."
+        : `Saat ini terdapat ${n} produk yang tersedia untuk dibeli.`;
+    case "outOfStockProducts":
+      return value === 0
+        ? "Tidak ada produk dengan stok habis saat ini."
+        : `Saat ini terdapat ${n} produk yang stoknya habis.`;
+    case "orders": {
+      const status = parseOrderStatus(message);
+      const st = status ? ` berstatus ${ORDER_STATUS_LABEL[status]}` : "";
+      if (value === 0) {
+        if (userRole === "BUYER") return "Anda belum memiliki pesanan.";
+        if (userRole === "SELLER") return `Toko Anda belum memiliki pesanan${st}.`;
+        return `Belum ada pesanan di marketplace${st}.`;
+      }
+      if (userRole === "BUYER") return `Anda memiliki ${n} pesanan${st}.`;
+      if (userRole === "SELLER") return `Toko Anda memiliki ${n} pesanan${st}.`;
+      return `Terdapat ${n} pesanan di marketplace${st}.`;
+    }
+  }
+}
+
+/** Section konteks untuk satu pertanyaan hitungan (data + format terpisah). */
+async function fetchCountSection(
+  user: SafeUser,
+  kind: CountKind,
+  message: string,
+): Promise<ContextSection> {
+  const value = await queryCountData(user, kind, message);
+  const label: Record<CountKind, string> = {
+    seller: "penjual",
+    buyer: "pembeli",
+    admin: "admin",
+    user: "pengguna",
+    store: "toko",
+    totalProducts: "produk (total)",
+    availableProducts: "produk tersedia",
+    outOfStockProducts: "produk stok habis",
+    orders: "pesanan",
+  };
+  const publicKinds: CountKind[] = [
+    "seller", "store", "totalProducts", "availableProducts", "outOfStockProducts",
+  ];
+  const scope: ContextScope =
+    value === null
+      ? "admin"
+      : kind === "orders"
+        ? user.role === "BUYER"
+          ? "milik-sendiri"
+          : user.role === "SELLER"
+            ? "toko-sendiri"
+            : "admin"
+        : publicKinds.includes(kind)
+          ? "publik"
+          : "admin";
+
+  return {
+    key: "count",
+    label:
+      value === null
+        ? `Keterbatasan data ${label[kind]} (admin)`
+        : `Jumlah ${label[kind]} (data aktual)`,
+    scope,
+    asOf: new Date().toISOString(),
+    text: formatCountAnswer(kind, value, message, user.role),
   };
 }
 
@@ -719,18 +1005,21 @@ export async function buildChatContext(
   opts?: { contextProductIds?: string[] },
 ): Promise<ChatContext> {
   const keywords = extractKeywords(message);
+  const priceFilter = parsePriceFilter(message) ?? undefined;
   const intents = detectIntents(message);
+  const countKinds = detectCountQuery(message);
+  const hasCount = countKinds.length > 0;
 
   // Katalog hanya relevan untuk pertanyaan berbasis produk — jangan kirim
-  // daftar produk untuk pertanyaan akun/statistik/pesanan/info aplikasi.
+  // daftar produk untuk pertanyaan akun/statistik/hitungan/pesanan/info aplikasi.
   const strongNonCatalog =
-    intents.has("stats") || intents.has("appinfo") || intents.has("account");
+    intents.has("stats") || intents.has("appinfo") || intents.has("account") || hasCount;
   const catalogIntent =
     intents.has("product") || intents.has("lowstock") || intents.has("outofstock");
   const catalogRelevant =
     !strongNonCatalog && (catalogIntent || (keywords.length > 0 && !intents.has("order")));
 
-  const products = catalogRelevant ? await searchCatalog(keywords) : [];
+  const products = catalogRelevant ? await searchCatalog(keywords, priceFilter) : [];
 
   // Produk dari konteks percakapan sebelumnya (ID valid dari sesi yang sama,
   // divalidasi ulang dari DB — harga/stok terkini, bukan ingatan model).
@@ -739,13 +1028,14 @@ export async function buildChatContext(
   // Fokus produk: nama produk yang cocok dengan keyword (toleran ILIKE).
   // - 1 cocok → fokus (jawab spesifik, bukan ringkasan seluruh katalog)
   // - ≥2 cocok → ambigu → minta klarifikasi
-  const focusMatches = catalogRelevant ? await findFocusProducts(keywords) : [];
+  // Sekarang juga menerapkan filter harga jika ada.
+  const focusMatches = catalogRelevant ? await findFocusProducts(keywords, priceFilter) : [];
   const focus = focusMatches.length === 1 ? focusMatches[0] : null;
   const focusCandidates = focus ? [] : focusMatches;
   // Pertanyaan lanjutan ("berapa harganya?") dengan tepat 1 produk di riwayat
   // → fokus ke produk riwayat (stok/harga tetap divalidasi ulang dari DB).
   let focusProduct: AiProduct | null = focus;
-  if (!focusProduct && focusCandidates.length === 0 && contextProducts.length === 1 && intents.has("product")) {
+  if (!focusProduct && focusCandidates.length === 0 && contextProducts.length === 1 && intents.has("product") && !hasCount) {
     focusProduct = contextProducts[0];
   }
   // Pertanyaan lanjutan tanpa referensi jelas (tanpa nama & tanpa konteks)
@@ -759,20 +1049,43 @@ export async function buildChatContext(
     !/\bapa saja\b|\bkatalog\b|\bdaftar\b|semua produk|produk yang (?:tersedia|ada)|produk apa/i.test(message);
 
   const jobs: (Promise<ContextSection | null> | null)[] = [];
+  // Hitungan spesifik ("berapa jumlah penjual?") → jawaban HANYA entitas yang
+  // ditanya. Diprioritaskan di atas ringkasan statistik umum; dilewati bila ada
+  // fokus produk bernama (entitas spesifik > hitungan agregat).
+  if (hasCount && !focusProduct && focusCandidates.length === 0) {
+    for (const kind of countKinds) jobs.push(fetchCountSection(user, kind, message));
+  }
   // Ringkasan katalog hanya bila TIDAK sedang fokus ke produk tertentu
   // (pertanyaan satu produk tidak perlu ringkasan seluruh katalog).
   if (catalogRelevant && !focusProduct && focusCandidates.length === 0 && !ambiguousFollowUp) {
     jobs.push(fetchCatalogSummary()); // "kosong" vs "habis" tidak tertukar
   }
-  if (intents.has("order")) jobs.push(fetchOrders(user));
+  // Daftar pesanan dilewati bila yang ditanya JUMLUHnya (hitungan menang).
+  if (intents.has("order") && !(hasCount && countKinds.includes("orders"))) jobs.push(fetchOrders(user));
   if (intents.has("sales")) jobs.push(fetchSales(user));
-  if (intents.has("stats")) jobs.push(fetchStats(user));
-  // "berapa jumlah penjual?" non-admin → jawab data publik (toko aktif).
-  if (intents.has("stats") && user.role !== "ADMIN") jobs.push(fetchMarketReach(user, message));
+  // Ringkasan statistik umum HANYA bila TIDAK ada hitungan spesifik —
+  // "berapa jumlah penjual" tidak boleh membanjiri seluruh statistik.
+  if (intents.has("stats") && !hasCount) {
+    jobs.push(fetchStats(user));
+    if (user.role !== "ADMIN") jobs.push(fetchMarketReach(user, message));
+  }
   if (intents.has("lowstock")) jobs.push(fetchLowStock(user, message));
-  if (intents.has("outofstock")) jobs.push(fetchOutOfStock(user, message));
-  if (intents.has("store")) jobs.push(fetchStores(keywords));
-  if (intents.has("account")) jobs.push(fetchAccount(user, message));
+  // Daftar stok habis dilewati bila yang ditanya JUMLUH produk habis.
+  if (
+    intents.has("outofstock") &&
+    !(hasCount && countKinds.includes("outOfStockProducts"))
+  ) {
+    jobs.push(fetchOutOfStock(user, message));
+  }
+  // Profil toko (ILIKE) dilewati bila yang ditanya jumlah penjual/toko.
+  if (
+    intents.has("store") &&
+    !(hasCount && (countKinds.includes("store") || countKinds.includes("seller")))
+  ) {
+    jobs.push(fetchStores(keywords));
+  }
+  // Akun tidak ikut saat pertanyaan hitungan ("terdaftar" mengandung kata "daftar").
+  if (intents.has("account") && !hasCount) jobs.push(fetchAccount(user, message));
   if (intents.has("appinfo")) jobs.push(fetchAppInfo());
 
   const sections = (await Promise.all(jobs)).filter((s): s is ContextSection => s !== null);

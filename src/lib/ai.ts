@@ -2,7 +2,7 @@
  * Asisten AI marketplace — API key HANYA dibaca di backend (server env).
  *
  * Desain:
- * 1. Pesan user → ekstrak kata kunci → cari produk nyata di DB (grounding).
+ * 1. Pesan user → ekstrak kata kunci + filter harga → cari produk nyata di DB (grounding).
  * 2. Bila AI_API_KEY tersedia → kirim pesan + katalog grounding ke provider
  *    OpenAI-compatible; model WAJIB menjawab dari katalog & menandai produk
  *    dengan [produk:<id>].
@@ -13,7 +13,9 @@
  * jawaban tidak pernah berisi produk/harga karangan.
  */
 
-import { Prisma } from "../../prisma/generated/client";
+import {
+  Prisma
+} from "../../prisma/generated/client";
 import { prisma } from "./prisma";
 import type { ContextSection } from "./ai-context";
 
@@ -70,6 +72,145 @@ function toAiProduct(r: ProductRow): AiProduct {
   };
 }
 
+/** Filter harga yang diekstrak dari pesan user. */
+export type PriceFilter = {
+  min?: number; // inclusive
+  max?: number; // inclusive untuk "maksimal", exclusive untuk "di bawah/kurang dari"
+  maxExclusive?: boolean; // true = < max, false = <= max
+};
+
+/**
+ * Parse filter harga dari bahasa alami Indonesia.
+ * Mendukung:
+ * - "di bawah 50000", "kurang dari 50000", "di bawah Rp50.000" → max=50000, maxExclusive=true
+ * - "maksimal 50000", "maksimal Rp50.000", "seluruhnya 50000" → max=50000, maxExclusive=false
+ * - "di atas 100000", "lebih dari 100000" → min=100000
+ * - "20 ribu sampai 50 ribu", "20000-50000" → min=20000, max=50000
+ * - "Rp50.000", "Rp 50.000", "50000", "50.000", "50 ribu", "lima puluh ribu"
+ */
+export function parsePriceFilter(message: string): PriceFilter | null {
+  const m = message.toLowerCase();
+  
+  // Helper: konversi teks angka Indonesia ke number
+  const parseAmount = (text: string): number | null => {
+    // Hapus "rp", spasi, titik pemisah ribuan
+    const clean = text.replace(/rp\s*/g, "").replace(/[.\s]/g, "").replace(/,/g, ".");
+    
+    // Handle "X ribu", "X juta"
+    const ribuMatch = clean.match(/^([\d.]+)\s*ribu$/);
+    if (ribuMatch) return Math.round(parseFloat(ribuMatch[1]) * 1000);
+    
+    const jutaMatch = clean.match(/^([\d.]+)\s*juta$/);
+    if (jutaMatch) return Math.round(parseFloat(jutaMatch[1]) * 1_000_000);
+    
+    // Handle angka biasa
+    const num = parseFloat(clean);
+    return isNaN(num) ? null : Math.round(num);
+  };
+
+  const filter: PriceFilter = {};
+
+  // Pattern: "di bawah X", "kurang dari X", "di bawah Rp X" → max exclusive
+  const belowMatch = m.match(/(?:di\s+bawah|kurang\s+dari|below|less\s+than)\s+(rp?\s*[\d.,]+\s*(?:ribu|juta)?|\d[\d.,]*(?:\s*(?:ribu|juta))?)/);
+  if (belowMatch) {
+    const val = parseAmount(belowMatch[1]);
+    if (val !== null) {
+      filter.max = val;
+      filter.maxExclusive = true;
+    }
+  }
+
+  // Pattern: "maksimal X", "maks X", "seluruhnya X", "max X" → max inclusive
+  const maxMatch = m.match(/(?:maksimal|maks|seluruhnya|max(?:imum)?)\s+(rp?\s*[\d.,]+\s*(?:ribu|juta)?|\d[\d.,]*(?:\s*(?:ribu|juta))?)/);
+  if (maxMatch) {
+    const val = parseAmount(maxMatch[1]);
+    if (val !== null) {
+      filter.max = val;
+      filter.maxExclusive = false;
+    }
+  }
+
+  // Pattern: "di atas X", "lebih dari X", "minimum X", "min X" → min
+  const aboveMatch = m.match(/(?:di\s+atas|lebih\s+dari|minimum|min\.?|above|more\s+than)\s+(rp?\s*[\d.,]+\s*(?:ribu|juta)?|\d[\d.,]*(?:\s*(?:ribu|juta))?)/);
+  if (aboveMatch) {
+    const val = parseAmount(aboveMatch[1]);
+    if (val !== null) filter.min = val;
+  }
+
+  // Pattern: "X sampai Y", "X - Y", "X s/d Y", "antara X dan Y"
+  // Juga tangkap "X-Y" tanpa spasi
+  const rangeMatch = m.match(/(?:rp?\s*[\d.,]+\s*(?:ribu|juta)?|\d[\d.,]*(?:\s*(?:ribu|juta))?)\s*(?:sampai|sd|s\/d|-|hingga|sampai\s+dengan)\s*(?:rp?\s*[\d.,]+\s*(?:ribu|juta)?|\d[\d.,]*(?:\s*(?:ribu|juta))?)/);
+  if (rangeMatch) {
+    // Extract both numbers
+    const nums = rangeMatch[0].match(/(?:rp?\s*[\d.,]+\s*(?:ribu|juta)?|\d[\d.,]*(?:\s*(?:ribu|juta))?)/g);
+    if (nums && nums.length >= 2) {
+      const minVal = parseAmount(nums[0]);
+      const maxVal = parseAmount(nums[1]);
+      if (minVal !== null) filter.min = minVal;
+      if (maxVal !== null) {
+        filter.max = maxVal;
+        filter.maxExclusive = false; // "sampai" biasanya inclusive
+      }
+    }
+  }
+
+  // Pattern: "antara X dan Y"
+  const betweenMatch = m.match(/antara\s+(?:rp?\s*[\d.,]+\s*(?:ribu|juta)?|\d[\d.,]*(?:\s*(?:ribu|juta))?)\s+dan\s+(?:rp?\s*[\d.,]+\s*(?:ribu|juta)?|\d[\d.,]*(?:\s*(?:ribu|juta))?)/);
+  if (betweenMatch) {
+    const nums = betweenMatch[0].match(/(?:rp?\s*[\d.,]+\s*(?:ribu|juta)?|\d[\d.,]*(?:\s*(?:ribu|juta))?)/g);
+    if (nums && nums.length >= 2) {
+      const minVal = parseAmount(nums[0]);
+      const maxVal = parseAmount(nums[1]);
+      if (minVal !== null) filter.min = minVal;
+      if (maxVal !== null) {
+        filter.max = maxVal;
+        filter.maxExclusive = false;
+      }
+    }
+  }
+
+  // Pattern: "X ribu", "X juta" sebagai max (tanpa kata "di bawah/maksimal")
+  // Contoh: "produk 50 ribu" → max=50000 eksklusif (default aman)
+  const simpleMaxMatch = m.match(/(?:rp?\s*)?([\d.,]+)\s*(ribu|juta)\b/);
+  if (simpleMaxMatch && !filter.max && !filter.min) {
+    const val = parseAmount(simpleMaxMatch[1] + " " + simpleMaxMatch[2]);
+    if (val !== null) {
+      filter.max = val;
+      filter.maxExclusive = true; // default aman: "di bawah"
+    }
+  }
+
+  // Jika tidak ada filter yang terdeteksi
+  if (filter.min === undefined && filter.max === undefined) return null;
+
+  return filter;
+}
+
+/**
+ * Validasi apakah produk memenuhi filter harga.
+ * Dipakai di fallback (dan bisa dipakai untuk validasi hasil AI).
+ */
+export function productMatchesPriceFilter(product: AiProduct, filter: PriceFilter | null): boolean {
+  if (!filter) return true;
+  const price = product.price;
+  if (filter.min !== undefined && price < filter.min) return false;
+  if (filter.max !== undefined) {
+    if (filter.maxExclusive) {
+      if (price >= filter.max) return false;
+    } else {
+      if (price > filter.max) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Filter array produk berdasarkan price filter.
+ */
+export function filterProductsByPrice(products: AiProduct[], filter: PriceFilter): AiProduct[] {
+  return products.filter((p) => productMatchesPriceFilter(p, filter));
+}
+
 export type AiChatResult = {
   reply: string;
   products: AiProduct[];
@@ -92,16 +233,34 @@ export function extractKeywords(message: string): string[] {
 /**
  * Cari produk nyata di DB untuk grounding jawaban AI.
  * Parameter seluruhnya lewat binding Prisma.sql (aman dari SQL injection).
+ * Sekarang mendukung filter harga (min/max) yang diterapkan di level database.
  */
-export async function searchCatalog(keywords: string[]): Promise<AiProduct[]> {
-  if (keywords.length === 0) return [];
+export async function searchCatalog(
+  keywords: string[],
+  priceFilter?: PriceFilter
+): Promise<AiProduct[]> {
+  if (keywords.length === 0 && !priceFilter) return [];
 
   const conds = keywords.map(
     (kw) => Prisma.sql`(p.name ILIKE ${"%" + kw + "%"} OR p.description ILIKE ${"%" + kw + "%"} OR c.name ILIKE ${"%" + kw + "%"})`,
   );
-  const match = Prisma.join(conds, " OR ");
+  const match = conds.length > 0 ? Prisma.join(conds, " OR ") : Prisma.sql`true`;
 
-  // Cari produk yang match keyword
+  // Build price filter conditions
+  const priceConds: Prisma.Sql[] = [];
+  if (priceFilter?.min !== undefined) {
+    priceConds.push(Prisma.sql`p.price >= ${priceFilter.min}`);
+  }
+  if (priceFilter?.max !== undefined) {
+    if (priceFilter.maxExclusive) {
+      priceConds.push(Prisma.sql`p.price < ${priceFilter.max}`);
+    } else {
+      priceConds.push(Prisma.sql`p.price <= ${priceFilter.max}`);
+    }
+  }
+  const priceMatch = priceConds.length > 0 ? Prisma.join(priceConds, " AND ") : Prisma.sql`true`;
+
+  // Cari produk yang match keyword DAN filter harga
   const rows = await prisma.$queryRaw<ProductRow[]>(Prisma.sql`
     SELECT p.id, p.name, p.price::float AS price, p.stock, p.image,
            s."storeName" AS "storeName", c.name AS "categoryName",
@@ -117,11 +276,12 @@ export async function searchCatalog(keywords: string[]): Promise<AiProduct[]> {
     ) r ON r."productId" = p.id
     WHERE p.status = 'AVAILABLE' AND p.stock > 0
       AND (${match})
+      AND (${priceMatch})
     ORDER BY (r."ratingAvg" IS NULL), r."ratingAvg" DESC, p.stock DESC
     LIMIT 8
   `);
 
-  // Jika tidak ada produk yang match keyword, kembalikan produk AVAILABLE terbaru
+  // Jika tidak ada produk yang match keyword+filter, kembalikan produk AVAILABLE terbaru yang match filter
   if (rows.length === 0) {
     const fallbackRows = await prisma.$queryRaw<ProductRow[]>(Prisma.sql`
       SELECT p.id, p.name, p.price::float AS price, p.stock, p.image,
@@ -137,6 +297,7 @@ export async function searchCatalog(keywords: string[]): Promise<AiProduct[]> {
         FROM "Review" GROUP BY "productId"
       ) r ON r."productId" = p.id
       WHERE p.status = 'AVAILABLE' AND p.stock > 0
+        AND (${priceMatch})
       ORDER BY p."createdAt" DESC
       LIMIT 8
     `);
@@ -151,12 +312,30 @@ export async function searchCatalog(keywords: string[]): Promise<AiProduct[]> {
  * tanpa peduli status — boleh OUT_OF_STOCK agar bisa menjawab "stok habis").
  * Dipakai untuk menjawab pertanyaan SATU produk (mis. "berapa stok ikan kerapu?")
  * tanpa menampilkan ringkasan seluruh katalog.
+ * Sekarang mendukung filter harga opsional.
  */
-export async function findFocusProducts(keywords: string[]): Promise<AiProduct[]> {
-  if (keywords.length === 0) return [];
+export async function findFocusProducts(
+  keywords: string[],
+  priceFilter?: PriceFilter
+): Promise<AiProduct[]> {
+  if (keywords.length === 0 && !priceFilter) return [];
 
   const conds = keywords.map((kw) => Prisma.sql`p.name ILIKE ${"%" + kw + "%"}`);
-  const match = Prisma.join(conds, " OR ");
+  const match = conds.length > 0 ? Prisma.join(conds, " OR ") : Prisma.sql`true`;
+
+  // Build price filter conditions
+  const priceConds: Prisma.Sql[] = [];
+  if (priceFilter?.min !== undefined) {
+    priceConds.push(Prisma.sql`p.price >= ${priceFilter.min}`);
+  }
+  if (priceFilter?.max !== undefined) {
+    if (priceFilter.maxExclusive) {
+      priceConds.push(Prisma.sql`p.price < ${priceFilter.max}`);
+    } else {
+      priceConds.push(Prisma.sql`p.price <= ${priceFilter.max}`);
+    }
+  }
+  const priceMatch = priceConds.length > 0 ? Prisma.join(priceConds, " AND ") : Prisma.sql`true`;
 
   const rows = await prisma.$queryRaw<ProductRow[]>(Prisma.sql`
     SELECT p.id, p.name, p.price::float AS price, p.stock, p.image,
@@ -173,6 +352,7 @@ export async function findFocusProducts(keywords: string[]): Promise<AiProduct[]
     ) r ON r."productId" = p.id
     WHERE p.status <> 'HIDDEN'
       AND (${match})
+      AND (${priceMatch})
     ORDER BY (p.status = 'AVAILABLE' AND p.stock > 0) DESC, p.name ASC
     LIMIT 6
   `);
@@ -217,7 +397,9 @@ const SYSTEM_PROMPT = [
   "15. Bila pertanyaan menyebut varian/ukuran/detail yang tidak ada dalam data (mis. ukuran produk), katakan informasi itu belum tersedia di data — jangan mengarang.",
   "16. Pertanyaan 'cara mengubah profil/password' dijawab dari panduan pada DATA KONTEKS akun (menu akun → Informasi Diri) — sebutkan langkah navigasi singkat.",
   "17. Pertanyaan layanan/tentang kami/panduan dijawab dari section 'Informasi layanan & panduan Mendung Tirta'.",
-  "18. 'berapa jumlah penjual/pembeli': ADMIN jawab dari section statistik; non-admin jawab dari section 'Jangkauan marketplace' (toko aktif = data publik; jumlah pembeli = data internal admin).",
+  "18. Pertanyaan HITUNGAN tunggal (jumlah penjual, pembeli, admin, pengguna, toko, produk tersedia/habis/total, atau pesanan — termasuk variasi 'ada berapa…', '…berapa', 'jumlah …') dijawab HANYA dengan angka dari section 'Jumlah … (data aktual)' — satu kalimat persis seperti datanya; JANGAN menambahkan statistik atau daftar lain yang tidak diminta.",
+  "19. Bila yang tersedia hanya section 'Keterbatasan data … (admin)', sampaikan batasan peran itu apa adanya — jangan mengarang angka. Ringkasan 'Statistik marketplace'/'Jangkauan marketplace' hanya dipakai bila user meminta rekap/statistik secara umum (mis. 'tampilkan statistik marketplace'), bukan untuk pertanyaan hitungan satu entitas.",
+  "20. Jika user meminta filter harga (mis. 'di bawah 50000', 'maksimal 50 ribu', '20k-50k'), filter SUDAH diterapkan di database. Jawab HANYA dari produk yang dikirim — JANGAN menambahkan produk di luar filter. Jika tidak ada produk, katakan tidak ditemukan.",
 ].join("\n");
 
 /** Format section konteks per-peran + katalog untuk prompt model. */
@@ -228,10 +410,15 @@ function contextForPrompt(
   focus: AiProduct | null,
   focusCandidates: AiProduct[],
 ): string {
-  const parts = sections.map(
-    (s) =>
-      `DATA KONTEKS — ${s.label} (scope: ${s.scope}; diambil ${new Date(s.asOf).toLocaleString("id-ID")}):\n${s.text}`,
-  );
+  const parts = sections.map((s) => {
+    const head =
+      `DATA KONTEKS — ${s.label} (scope: ${s.scope}; diambil ${new Date(s.asOf).toLocaleString("id-ID")}):\n${s.text}`;
+    // Hitungan tunggal: instruksi eksplisit agar model tidak menambah
+    // statistik lain yang tidak diminta user.
+    return s.key === "count"
+      ? `${head}\n(section ini HANYA berisi angka yang ditanyakan — jawab satu kalimat dengan angka tersebut saja; JANGAN tambahkan statistik atau daftar lain)`
+      : head;
+  });
   if (focus) {
     parts.push(
       "PRODUK FOKUS (paling cocok dengan pertanyaan user — prioritaskan menjawab tentang produk ini):\n" +
@@ -304,12 +491,16 @@ function focusedReply(p: AiProduct, message: string): string {
  * Jawaban fallback (tanpa model LLM / provider gagal / API key tidak ada) —
  * tetap berbasis data nyata dari database, dengan urutan prioritas:
  * 1. fokus satu produk → jawaban spesifik (bukan ringkasan katalog)
+ * 1b. hitungan per entitas (jumlah penjual/pembeli/…) → hanya angka yang diminta
  * 2. pertanyaan lanjutan tanpa referensi jelas → minta klarifikasi
  * 3. beberapa kandidat produk ambigu → minta klarifikasi
  * 4. pertanyaan stok habis/menipis → daftar status stok saja
  * 5. section konteks (akun/pesanan/statistik/…) + daftar produk bila relevan
  * 6. tidak ada data yang cocok → saran kata kunci
  * 7. daftar produk pencarian umum
+ * 
+ * Semua jalur produk menerapkan validasi deterministik filter harga (jika ada)
+ * sebagai safety net — memastikan tidak ada produk yang bocor keluar filter.
  */
 export function fallbackResult(opts: {
   message: string;
@@ -321,17 +512,42 @@ export function fallbackResult(opts: {
   ambiguousFollowUp?: boolean;
   generatedAt: string;
 }): AiChatResult {
-  const allProducts = [
+  // Parse price filter dari pesan untuk validasi deterministik
+  const priceFilter = parsePriceFilter(opts.message);
+
+  // Helper: terapkan filter harga ke array produk (safety net)
+  const applyPriceFilter = (prods: AiProduct[]): AiProduct[] =>
+    priceFilter ? filterProductsByPrice(prods, priceFilter) : prods;
+
+  const allProducts = applyPriceFilter([
     ...opts.products,
     ...(opts.contextProducts ?? []).filter((c) => !opts.products.some((p) => p.id === c.id)),
-  ];
+  ]);
 
   // 1. Fokus satu produk — jawab spesifik, tanpa ringkasan katalog.
   if (opts.focus) {
+    // Validasi fokus terhadap filter harga
+    if (priceFilter && !productMatchesPriceFilter(opts.focus, priceFilter)) {
+      // Fokus tidak memenuhi filter → jangan tampilkan, turun ke klarifikasi
+    } else {
+      return {
+        reply: focusedReply(opts.focus, opts.message),
+        products: [opts.focus],
+        sources: buildSources([], [opts.focus], opts.generatedAt),
+        generatedAt: opts.generatedAt,
+        source: "fallback",
+      };
+    }
+  }
+
+  // 1b. Pertanyaan hitungan spesifik ("berapa jumlah penjual?") — jawab HANYA
+  //     angka yang diminta, tanpa membanjiri seluruh statistik marketplace.
+  const countSections = opts.sections.filter((s) => s.key === "count");
+  if (countSections.length > 0) {
     return {
-      reply: focusedReply(opts.focus, opts.message),
-      products: [opts.focus],
-      sources: buildSources([], [opts.focus], opts.generatedAt),
+      reply: countSections.map((s) => s.text).join("\n\n"),
+      products: [],
+      sources: buildSources(countSections, [], opts.generatedAt),
       generatedAt: opts.generatedAt,
       source: "fallback",
     };
@@ -353,7 +569,8 @@ export function fallbackResult(opts: {
 
   // 3. Nama produk ambigu — beberapa kandidat cocok → minta klarifikasi.
   if (opts.focusCandidates && opts.focusCandidates.length >= 2) {
-    const list = opts.focusCandidates
+    const filteredCandidates = applyPriceFilter(opts.focusCandidates);
+    const list = filteredCandidates
       .slice(0, 5)
       .map(
         (p, i) =>
@@ -364,8 +581,8 @@ export function fallbackResult(opts: {
       reply:
         `Ada beberapa produk yang cocok dengan kata kunci Anda:\n\n${list}\n\n` +
         "Produk mana yang Anda maksud? Sebutkan namanya agar saya berikan detail lengkap.",
-      products: opts.focusCandidates.slice(0, 5),
-      sources: buildSources([], opts.focusCandidates.slice(0, 5), opts.generatedAt),
+      products: filteredCandidates.slice(0, 5),
+      sources: buildSources([], filteredCandidates.slice(0, 5), opts.generatedAt),
       generatedAt: opts.generatedAt,
       source: "fallback",
     };
@@ -392,10 +609,11 @@ export function fallbackResult(opts: {
     const body = opts.sections.map((s) => `${s.label}:\n${s.text}`).join("\n\n");
     // Sertakan daftar produk bila ada — agar mode tanpa AI tetap bisa
     // menjawab "apa saja produk yang tersedia" dengan daftar nyata.
+    const filteredProducts = applyPriceFilter(allProducts);
     const productList =
-      allProducts.length > 0
+      filteredProducts.length > 0
         ? "\n\nProduk dari katalog:\n" +
-          allProducts
+          filteredProducts
             .slice(0, 5)
             .map(
               (p, i) =>
@@ -409,8 +627,8 @@ export function fallbackResult(opts: {
         "Berikut data terkini dari aplikasi:\n\n" +
         body.slice(0, 1600) +
         productList.slice(0, 600),
-      products: allProducts.slice(0, 5),
-      sources: buildSources(opts.sections, allProducts, opts.generatedAt),
+      products: filteredProducts.slice(0, 5),
+      sources: buildSources(opts.sections, filteredProducts, opts.generatedAt),
       generatedAt: opts.generatedAt,
       source: "fallback",
     };
@@ -476,6 +694,7 @@ export async function generateReply(opts: {
   const contextProducts = opts.contextProducts ?? [];
   const focus = opts.focus ?? null;
   const focusCandidates = opts.focusCandidates ?? [];
+  const priceFilter = parsePriceFilter(opts.message);
   const fallback = () => fallbackResult({ ...opts, generatedAt });
 
   // Union untuk validasi marker [produk:id] & label sumber katalog.
@@ -501,11 +720,16 @@ export async function generateReply(opts: {
     return Number.isFinite(n) && n >= 1_000 && n <= 120_000 ? n : 30_000;
   })();
 
+  // Build price filter description for AI context
+  const priceFilterDesc = priceFilter
+    ? `\nFILTER HARGA AKTIF (sudah diterapkan di database):${priceFilter.min !== undefined ? ` min=${priceFilter.min}` : ""}${priceFilter.max !== undefined ? ` max=${priceFilter.max}${priceFilter.maxExclusive ? " (eksklusif)" : " (inklusif)"}` : ""}`
+    : "";
+
   const messages = [
     { role: "system" as const, content: SYSTEM_PROMPT },
     {
       role: "system" as const,
-      content: `DATA DARI DATABASE:\n${contextForPrompt(opts.sections, opts.products, contextProducts, focus, focusCandidates)}`,
+      content: `DATA DARI DATABASE:${priceFilterDesc}\n${contextForPrompt(opts.sections, opts.products, contextProducts, focus, focusCandidates)}`,
     },
     ...opts.history.slice(-8),
     { role: "user" as const, content: opts.message },
