@@ -4,6 +4,12 @@ import {
   fallbackResult,
   generateReply,
   parsePriceFilter,
+  parseProductFilters,
+  parseCategoryFilter,
+  parseStoreFilter,
+  parseSortOrder,
+  parseStockFilter,
+  parseMinRating,
   filterProductsByPrice,
   productMatchesPriceFilter,
   type AiProduct,
@@ -569,5 +575,108 @@ describe("generateReply — kondisi provider AI", () => {
       process.env.AI_API_KEY = prev.key;
       process.env.AI_BASE_URL = prev.base;
     }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Product Filter Parser (Multi-Kriteria)                             */
+/* ------------------------------------------------------------------ */
+
+describe("parseProductFilters — filter gabungan multi-kriteria", () => {
+  it("menggabungkan harga, kategori, toko, dan sorting", () => {
+    const filters = parseProductFilters("kategori ikan segar dari toko Budi di bawah 100000 termurah");
+    expect(filters.price).toEqual({ max: 100000, maxExclusive: true });
+    expect(filters.category).toBe("ikan segar");
+    expect(filters.store).toBe("budi");
+    expect(filters.sortBy).toBe("price_asc");
+  });
+
+  it("hanya filter harga jika tidak ada kriteria lain", () => {
+    const filters = parseProductFilters("di bawah 50000");
+    expect(filters.price).toEqual({ max: 50000, maxExclusive: true });
+    expect(filters.category).toBeUndefined();
+    expect(filters.store).toBeUndefined();
+    expect(filters.sortBy).toBeUndefined();
+  });
+
+  it("reset ke undefined jika tidak ada filter", () => {
+    const filters = parseProductFilters("halo apa kabar");
+    expect(filters.price).toBeUndefined();
+    expect(filters.category).toBeUndefined();
+    expect(filters.store).toBeUndefined();
+  });
+});
+
+describe("parseCategoryFilter � ekstraksi kategori dari bahasa Indonesia", () => {
+  it("mengekstrak 'kategori ikan'", () => {
+    expect(parseCategoryFilter("kategori ikan")).toBe("ikan");
+  });
+
+  it("mengekstrak 'jenis umpan'", () => {
+    expect(parseCategoryFilter("jenis umpan")).toBe("umpan");
+  });
+
+  it("return null jika tidak ada penanda kategori", () => {
+    expect(parseCategoryFilter("ikan segar")).toBeNull();
+  });
+});
+
+describe("parseStoreFilter � ekstraksi nama toko", () => {
+  it("mengekstrak 'dari toko Budi'", () => {
+    expect(parseStoreFilter("dari toko Budi")).toBe("budi");
+  });
+
+  it("mengekstrak 'toko Pancing Jaya'", () => {
+    expect(parseStoreFilter("toko Pancing Jaya")).toBe("pancing jaya");
+  });
+
+  it("return null jika tidak ada penanda toko", () => {
+    expect(parseStoreFilter("ikan segar")).toBeNull();
+  });
+});
+
+describe("parseSortOrder � preferensi urutan", () => {
+  it("'termurah' ? price_asc", () => {
+    expect(parseSortOrder("termurah")).toBe("price_asc");
+  });
+
+  it("'termahal' ? price_desc", () => {
+    expect(parseSortOrder("termahal")).toBe("price_desc");
+  });
+
+  it("'rating tertinggi' ? rating", () => {
+    expect(parseSortOrder("rating tertinggi")).toBe("rating");
+  });
+
+  it("tidak ada kata kunci sorting ? null", () => {
+    expect(parseSortOrder("ikan segar")).toBeNull();
+  });
+});
+
+describe("parseStockFilter � ketersediaan stok", () => {
+  it("'yang tersedia' ? true", () => {
+    expect(parseStockFilter("yang tersedia")).toBe(true);
+  });
+
+  it("'stok habis' ? false", () => {
+    expect(parseStockFilter("stok habis")).toBe(false);
+  });
+
+  it("tidak jelas ? null", () => {
+    expect(parseStockFilter("ikan segar")).toBeNull();
+  });
+});
+
+describe("parseMinRating � filter rating minimal", () => {
+  it("'rating di atas 4' ? 4", () => {
+    expect(parseMinRating("rating di atas 4")).toBe(4);
+  });
+
+  it("'bintang 4 ke atas' ? 4", () => {
+    expect(parseMinRating("bintang 4 ke atas")).toBe(4);
+  });
+
+  it("tidak ada ? null", () => {
+    expect(parseMinRating("ikan segar")).toBeNull();
   });
 });

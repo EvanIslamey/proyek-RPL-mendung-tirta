@@ -23,7 +23,9 @@ import {
   findFocusProducts,
   extractKeywords,
   parsePriceFilter,
+  parseProductFilters,
   type AiProduct,
+  type ProductFilter,
 } from "./ai";
 import type { SafeUser } from "./auth";
 
@@ -41,6 +43,7 @@ export type ContextSection = {
     | "store"
     | "account"
     | "catalog"
+    | "reviews"
     | "appinfo";
   label: string;
   scope: ContextScope;
@@ -92,6 +95,7 @@ export type ChatIntent =
   | "outofstock"
   | "store"
   | "account"
+  | "reviews"
   | "appinfo";
 
 /** Jenis hitungan tunggal yang ditanyakan user (spesifik > ringkasan umum). */
@@ -177,12 +181,17 @@ export function detectIntents(message: string): Set<ChatIntent> {
   if (
     has(
       "harga", "produk", "katalog", "tersedia", "stok", "kategori", "beli",
-      "rekomendasi", "murah", "mahal", "ready", "varian", "ukuran", "ulasan",
-      "review", "rating", "diskon", "restock", "masih ada", "ada nggak",
+      "rekomendasi", "murah", "mahal", "ready", "varian", "ukuran",
+      "diskon", "restock", "masih ada", "ada nggak",
       "ada gak", "mau cari", "cari", "dijual",
     )
   ) {
     intents.add("product");
+  }
+  // Reviews/ulasan
+  if (has("ulasan", "review", "rating", "komentar", "penilaian", "bintang")) {
+    intents.add("product");
+    intents.add("reviews");
   }
   // B. Pesanan
   if (has("pesanan", "pembelian", "order", "checkout", "bayar", "dibayar", "dikirim")) {
@@ -707,6 +716,50 @@ async function fetchAppInfo(): Promise<ContextSection> {
   };
 }
 
+/**
+ * Ulasan produk — publik, tapi dibatasi jumlah baris.
+ * Ambil ulasan untuk produk spesifik (jika ada fokus) atau ulasan terbaru.
+ */
+async function fetchReviews(
+  productIds: string[] | undefined,
+  message: string,
+): Promise<ContextSection | null> {
+  // Jika ada fokus produk → ambil ulasan produk itu; jika tidak → ulasan terbaru
+  const where = productIds && productIds.length > 0
+    ? { productId: { in: productIds } }
+    : {};
+
+  const reviews = await prisma.review.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    take: 8,
+    include: {
+      buyer: { select: { name: true } },
+      product: { select: { name: true } },
+    },
+  });
+
+  if (reviews.length === 0) return null;
+
+  const text = reviews
+    .map(
+      (r) =>
+        `${r.product.name} — ${"★".repeat(r.rating)}${"☆".repeat(5 - r.rating)} (${r.rating}/5) — ` +
+        `${r.buyer.name}: ${r.comment?.slice(0, 120) || "(tanpa komentar)"} — ${fmtDate(r.createdAt)}`,
+    )
+    .join("\n");
+
+  return {
+    key: "reviews",
+    label: productIds && productIds.length > 0
+      ? `Ulasan produk (${reviews.length} terbaru)`
+      : `Ulasan produk terbaru (${reviews.length})`,
+    scope: "publik",
+    asOf: new Date().toISOString(),
+    text,
+  };
+}
+
 /** Produk stok menipis — info katalog publik (stok terlihat di halaman produk). */
 async function fetchLowStock(user: SafeUser, message: string): Promise<ContextSection | null> {
   const threshold = stockAlertThreshold();
@@ -998,6 +1051,10 @@ async function fetchProductsByIds(ids: string[]): Promise<AiProduct[]> {
  * sebelumnya (divalidasi ulang dari DB — bukan ingatan model).
  * Melempar bila DB gagal → route menangkap dan menjawab dengan pesan
  * "layanan data tidak tersedia" (tanpa stack trace).
+ * 
+ * Sekarang mendukung filter gabungan: harga, kategori, toko, ketersediaan,
+ * rating, sorting — semuanya diekstrak dari bahasa alami dan diterapkan
+ * di level database via ProductFilter.
  */
 export async function buildChatContext(
   user: SafeUser,
@@ -1005,7 +1062,7 @@ export async function buildChatContext(
   opts?: { contextProductIds?: string[] },
 ): Promise<ChatContext> {
   const keywords = extractKeywords(message);
-  const priceFilter = parsePriceFilter(message) ?? undefined;
+  const filters = parseProductFilters(message);
   const intents = detectIntents(message);
   const countKinds = detectCountQuery(message);
   const hasCount = countKinds.length > 0;
@@ -1019,7 +1076,12 @@ export async function buildChatContext(
   const catalogRelevant =
     !strongNonCatalog && (catalogIntent || (keywords.length > 0 && !intents.has("order")));
 
-  const products = catalogRelevant ? await searchCatalog(keywords, priceFilter) : [];
+  // Cari produk dengan filter gabungan (bukan hanya PriceFilter lagi)
+  const hasAnyFilter = filters.price || filters.category || filters.store ||
+    filters.inStock !== undefined || filters.minRating !== undefined;
+  const products = catalogRelevant && (keywords.length > 0 || hasAnyFilter)
+    ? await searchCatalog(keywords, filters)
+    : [];
 
   // Produk dari konteks percakapan sebelumnya (ID valid dari sesi yang sama,
   // divalidasi ulang dari DB — harga/stok terkini, bukan ingatan model).
@@ -1028,8 +1090,9 @@ export async function buildChatContext(
   // Fokus produk: nama produk yang cocok dengan keyword (toleran ILIKE).
   // - 1 cocok → fokus (jawab spesifik, bukan ringkasan seluruh katalog)
   // - ≥2 cocok → ambigu → minta klarifikasi
-  // Sekarang juga menerapkan filter harga jika ada.
-  const focusMatches = catalogRelevant ? await findFocusProducts(keywords, priceFilter) : [];
+  const focusMatches = catalogRelevant && keywords.length > 0
+    ? await findFocusProducts(keywords, filters)
+    : [];
   const focus = focusMatches.length === 1 ? focusMatches[0] : null;
   const focusCandidates = focus ? [] : focusMatches;
   // Pertanyaan lanjutan ("berapa harganya?") dengan tepat 1 produk di riwayat
@@ -1059,6 +1122,11 @@ export async function buildChatContext(
   // (pertanyaan satu produk tidak perlu ringkasan seluruh katalog).
   if (catalogRelevant && !focusProduct && focusCandidates.length === 0 && !ambiguousFollowUp) {
     jobs.push(fetchCatalogSummary()); // "kosong" vs "habis" tidak tertukar
+  }
+  // Ulasan — bila intent reviews atau ada fokus produk
+  if (intents.has("reviews") || focusProduct) {
+    const focusIds = focusProduct ? [focusProduct.id] : focusCandidates.slice(0, 2).map((p) => p.id);
+    jobs.push(fetchReviews(focusIds.length > 0 ? focusIds : undefined, message));
   }
   // Daftar pesanan dilewati bila yang ditanya JUMLUHnya (hitungan menang).
   if (intents.has("order") && !(hasCount && countKinds.includes("orders"))) jobs.push(fetchOrders(user));

@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { requireUser } from "@/lib/auth";
-import { generateReply, type AiChatMessage } from "@/lib/ai";
+import { generateReply, parseProductFilters, type AiChatMessage } from "@/lib/ai";
 import { buildChatContext } from "@/lib/ai-context";
 import { hitRateLimit } from "@/lib/rate-limit";
 import { ApiError, assertSameOrigin, parseJsonBody } from "@/lib/validate";
@@ -89,6 +89,9 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    // Parse filter gabungan dari pesan untuk konteks AI
+    const filters = parseProductFilters(message);
+
     // 2. Balasan (AI bila provider berhasil, fallback berbasis data bila tidak).
     const result = await generateReply({
       message,
@@ -99,6 +102,7 @@ export async function POST(request: NextRequest) {
       focus: context.focus,
       focusCandidates: context.focusCandidates,
       ambiguousFollowUp: context.ambiguousFollowUp,
+      filters,
     });
 
     return Response.json(result);
