@@ -18,6 +18,8 @@ export default defineConfig({
     include: ["src/**/*.test.ts"],
     env: {
       DATABASE_URL: "postgresql://postgres@127.0.0.1:55999/mendung_tirta_test",
+      // Kunci enkripsi untuk test integrasi (nilai hanya untuk unit test, bukan produksi).
+      SECRET_ENCRYPTION_KEY: "kunci-tes-vitest-bukan-produksi-abcdef123456",
     },
   },
 });

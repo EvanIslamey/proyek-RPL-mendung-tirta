@@ -57,6 +57,12 @@ enum EmailStatus {
   SKIPPED // tidak dikirim (preferensi non-esensial mati / loop-guard)
 }
 
+// Jenis konfigurasi integrasi (Pengaturan → Informasi Diri).
+enum IntegrationService {
+  WHATSAPP // notifikasi WhatsApp (Meta Cloud API-compatible / dikembangkan)
+  AI_PROVIDER // API Key provider AI chatbot (OpenAI-compatible / NVIDIA NIM / ds.)
+}
+
 // MODELS
 
 model User {
@@ -247,4 +253,31 @@ model Notification {
   @@unique([userId, dedupeKey])
   @@index([userId, readAt])
   @@index([emailStatus, emailNextAt])
+}
+
+// Konfigurasi integrasi (WhatsApp & API Key AI) — dikelola dari halaman
+// Informasi Diri. Credential disimpan TERENKRIPSI (AES-256-GCM, lihat
+// src/lib/secret-store.ts) dan TIDAK PERNAH dikirim utuh ke frontend.
+model IntegrationConfig {
+  id        String            @id @default(uuid())
+  service   IntegrationService
+  // "" = konfigurasi GLOBAL aplikasi (hanya ADMIN); lainnya = userId pemilik (SELLER).
+  scope     String            @default("")
+  provider  String // label provider, mis. "meta-whatsapp-cloud" / "nvidia-nim"
+  endpoint  String? // base URL API (opsional — provider punya default)
+  // AES-256-GCM: "v1:<iv_b64>:<tag_b64>:<ct_b64>". Null = belum diisi.
+  credentialEnc  String?
+  // Pilihan tampilan "sk-••••1234" — aman ditampilkan, bukan rahasia asli.
+  credentialHint String?
+  model     String? // nama model AI (untuk service AI_PROVIDER)
+  meta      String? // JSON metadata NON-rahasia (phoneId, nama config, dst.)
+  isActive  Boolean           @default(false)
+  lastTestAt   DateTime? // waktu uji koneksi terakhir
+  lastTestOk   Boolean? // hasil uji koneksi terakhir (null = belum pernah)
+  lastTestNote String? // pesan hasil uji terakhir (tersanitasi, tanpa kredensial)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@unique([service, scope])
+  @@index([isActive])
 }

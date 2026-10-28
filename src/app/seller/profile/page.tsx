@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/Toast";
 import { formatDateId } from "@/lib/format";
+import { WhatsAppSettingsPanel } from "@/components/settings/WhatsAppSettingsPanel";
+import { IntegrationStatusPanel } from "@/components/settings/IntegrationStatusPanel";
 
 type Profile = {
   id: string;
@@ -316,6 +318,20 @@ export default function SellerProfilePage() {
             <dd>{profile?.orderCount ?? 0}</dd>
           </dl>
         </section>
+      </div>
+
+      {/* Bagian Pengaturan Integrasi — khusus penjual (konfigurasi WhatsApp miliknya sendiri). */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+          gap: "1.5rem",
+          alignItems: "start",
+          marginTop: "1.5rem",
+        }}
+      >
+        <WhatsAppSettingsPanel />
+        <IntegrationStatusPanel />
       </div>
     </>
   );

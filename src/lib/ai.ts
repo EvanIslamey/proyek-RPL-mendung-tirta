@@ -17,6 +17,7 @@ import {
   Prisma
 } from "../../prisma/generated/client";
 import { prisma } from "./prisma";
+import { resolveAiRuntime } from "./integrations";
 import type { ContextSection } from "./ai-context";
 
 const STOPWORDS = new Set([
@@ -1319,7 +1320,9 @@ export async function generateReply(opts: {
     if (!allProducts.some((x) => x.id === p.id)) allProducts.push(p);
   }
 
-  const apiKey = process.env.AI_API_KEY?.trim();
+  // Baca konfigurasi AI: prioritas konfigurasi AKTIF di DB (admin) → env.
+  const aiRuntime = await resolveAiRuntime();
+  const apiKey = aiRuntime.apiKey;
   if (!apiKey) {
     // Dicatat sekali — TANPA menampilkan key (kondisi: AI belum dikonfigurasi).
     if (!noKeyLogged) {
@@ -1329,12 +1332,9 @@ export async function generateReply(opts: {
     return fallback();
   }
 
-  const baseUrl = (process.env.AI_BASE_URL?.trim() || "https://api.openai.com/v1").replace(/\/+$/, "");
-  const model = process.env.AI_MODEL?.trim() || "gpt-4o-mini";
-  const timeoutMs = (() => {
-    const n = Number(process.env.AI_TIMEOUT_MS);
-    return Number.isFinite(n) && n >= 1_000 && n <= 120_000 ? n : 30_000;
-  })();
+  const baseUrl = aiRuntime.baseUrl;
+  const model = aiRuntime.model;
+  const timeoutMs = aiRuntime.timeoutMs;
 
   const messages = [
     { role: "system" as const, content: SYSTEM_PROMPT },
