@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   extractKeywords,
+  extractSubjectPhrase,
+  canonicalSubject,
+  matchSubjectToCategories,
+  describePriceFilterText,
+  isSingleProductQuestion,
   fallbackResult,
   generateReply,
   parsePriceFilter,
@@ -14,6 +19,7 @@ import {
   productMatchesPriceFilter,
   type AiProduct,
   type PriceFilter,
+  type ProductFilter,
 } from "@/lib/ai";
 import type { ContextSection } from "@/lib/ai-context";
 
@@ -576,6 +582,66 @@ describe("generateReply — kondisi provider AI", () => {
       process.env.AI_BASE_URL = prev.base;
     }
   });
+
+  it("query berfilter (subjek+harga) → DETERMINISTIK: tanpa panggil provider, format komposer", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("provider tidak boleh dipanggil untuk query berfilter");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const prev = { key: process.env.AI_API_KEY, base: process.env.AI_BASE_URL };
+    process.env.AI_API_KEY = "nvapi-test";
+    process.env.AI_BASE_URL = "https://example.invalid/v1";
+    try {
+      const r = await generateReply({
+        message: "hasil laut di bawah 50000",
+        history: [],
+        products: [cumi],
+        sections: [catalogSection],
+        filters: {
+          price: { max: 50000, maxExclusive: true },
+          subject: { phrase: "hasil laut", mode: "category", value: "Hasil Laut" },
+        },
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(r.source).toBe("fallback");
+      expect(r.products.map((p) => p.name)).toEqual(["Cumi-cumi Ring Segar (500 gr)"]);
+      expect(r.reply).toContain("Menampilkan 1 produk yang cocok");
+      expect(r.reply).toContain("di bawah Rp50.000");
+      expect(r.reply).not.toContain("Ringkasan katalog");
+    } finally {
+      vi.unstubAllGlobals();
+      process.env.AI_API_KEY = prev.key;
+      process.env.AI_BASE_URL = prev.base;
+    }
+  });
+
+  it("query berfilter hasil kosong → DETERMINISTIK 'tidak ada memenuhi filter' (bukan karangan model)", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("provider tidak boleh dipanggil untuk query berfilter");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const prev = { key: process.env.AI_API_KEY };
+    process.env.AI_API_KEY = "nvapi-test";
+    try {
+      const r = await generateReply({
+        message: "udang di bawah 10000",
+        history: [],
+        products: [],
+        sections: [],
+        filters: {
+          price: { max: 10000, maxExclusive: true },
+          subject: { phrase: "udang", mode: "name", value: "udang" },
+        },
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(r.source).toBe("fallback");
+      expect(r.products).toEqual([]);
+      expect(r.reply).toContain("Tidak ada produk udang yang memenuhi");
+    } finally {
+      vi.unstubAllGlobals();
+      process.env.AI_API_KEY = prev.key;
+    }
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -678,5 +744,264 @@ describe("parseMinRating � filter rating minimal", () => {
 
   it("tidak ada ? null", () => {
     expect(parseMinRating("ikan segar")).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Subjek produk — ekstraksi frasa, sinonim, validasi ke kategori      */
+/* ------------------------------------------------------------------ */
+
+describe("extractSubjectPhrase — ekstraksi subjek dari bahasa Indonesia", () => {
+  it("'Produk hasil laut di bawah 50000' → 'hasil laut'", () => {
+    expect(extractSubjectPhrase("Produk hasil laut di bawah 50000")).toBe("hasil laut");
+  });
+
+  it("'Hasil laut di atas 50000' → 'hasil laut'", () => {
+    expect(extractSubjectPhrase("Hasil laut di atas 50000")).toBe("hasil laut");
+  });
+
+  it("'Ikan yang masih tersedia di bawah 100000' → 'ikan' (kata ketersediaan dibuang)", () => {
+    expect(extractSubjectPhrase("Ikan yang masih tersedia di bawah 100000")).toBe("ikan");
+  });
+
+  it("'Umpan di bawah 75000' → 'umpan'", () => {
+    expect(extractSubjectPhrase("Umpan di bawah 75000")).toBe("umpan");
+  });
+
+  it("'Alat pancing di atas 100000' → 'alat pancing'", () => {
+    expect(extractSubjectPhrase("Alat pancing di atas 100000")).toBe("alat pancing");
+  });
+
+  it("frasa toko dibuang: 'Hasil laut dari toko Hasil Laut Pak Budi di atas 50000' → 'hasil laut'", () => {
+    expect(
+      extractSubjectPhrase("Hasil laut dari toko Hasil Laut Pak Budi di atas 50000"),
+    ).toBe("hasil laut");
+  });
+
+  it("tanpa subjek: 'di bawah 50000' → null", () => {
+    expect(extractSubjectPhrase("di bawah 50000")).toBeNull();
+    expect(extractSubjectPhrase("di atas 50000")).toBeNull();
+  });
+
+  it("pertanyaan hitungan tetap mengekstrak subjek: 'berapa jumlah produk hasil laut?' → 'hasil laut'", () => {
+    expect(extractSubjectPhrase("berapa jumlah produk hasil laut?")).toBe("hasil laut");
+  });
+
+  it("sorting dibuang dari subjek: 'umpan di bawah 75000 termurah' → 'umpan'", () => {
+    expect(extractSubjectPhrase("umpan di bawah 75000 termurah")).toBe("umpan");
+  });
+});
+
+describe("matchSubjectToCategories — validasi subjek ke kategori aktual", () => {
+  const cats = ["Alat Pancing", "Umpan", "Hasil Laut"];
+
+  it("exact match menang", () => {
+    expect(matchSubjectToCategories("hasil laut", cats)).toEqual({ value: "Hasil Laut" });
+    expect(matchSubjectToCategories("alat pancing", cats)).toEqual({ value: "Alat Pancing" });
+  });
+
+  it("parsial dua arah ('laut' → kategori yang mengandungnya)", () => {
+    expect(matchSubjectToCategories("laut", cats)).toEqual({ value: "Hasil Laut" });
+    expect(matchSubjectToCategories("pancing", cats)).toEqual({ value: "Alat Pancing" });
+  });
+
+  it("tanpa kategori cocok → null (bukan dipaksa)", () => {
+    expect(matchSubjectToCategories("ikan", cats)).toBeNull();
+  });
+
+  it(">1 kandidat → ambiguous (wajib klarifikasi, jangan menebak)", () => {
+    const r = matchSubjectToCategories("hasil", ["Hasil Laut", "Hasil Pantai"]);
+    expect(r).toEqual({ ambiguous: ["Hasil Laut", "Hasil Pantai"] });
+  });
+});
+
+describe("canonicalSubject — sinonim aman ke entitas yang ada", () => {
+  it("sinonim kategori/menuju kategori", () => {
+    expect(canonicalSubject("seafood")).toBe("hasil laut");
+    expect(canonicalSubject("pancing")).toBe("alat pancing");
+    expect(canonicalSubject("lure")).toBe("umpan");
+  });
+
+  it("sinonim nama produk", () => {
+    expect(canonicalSubject("cumi-cumi")).toBe("cumi");
+    expect(canonicalSubject("ikan segar")).toBe("ikan");
+    expect(canonicalSubject("sotong")).toBe("cumi");
+  });
+
+  it("istilah tak dikenal tidak diubah", () => {
+    expect(canonicalSubject("zebra")).toBe("zebra");
+  });
+});
+
+describe("describePriceFilterText & isSingleProductQuestion", () => {
+  it("deskripsi operator harga untuk jawaban", () => {
+    expect(describePriceFilterText({ max: 50000, maxExclusive: true })).toBe("di bawah Rp50.000");
+    expect(describePriceFilterText({ max: 50000 })).toBe("maksimal Rp50.000");
+    expect(describePriceFilterText({ min: 50000 })).toBe("minimal Rp50.000");
+    expect(describePriceFilterText({ min: 30000, max: 50000 })).toBe(
+      "antara Rp30.000 dan Rp50.000",
+    );
+    expect(describePriceFilterText(undefined)).toBeNull();
+  });
+
+  it("pertanyaan atribut SATU produk vs pertanyaan filter/list", () => {
+    expect(isSingleProductQuestion("berapa stok ikan kerapu?")).toBe(true);
+    expect(isSingleProductQuestion("Berapa harga ikan kerapu?")).toBe(true);
+    expect(isSingleProductQuestion("ulasan ikan kerapu")).toBe(true);
+    expect(isSingleProductQuestion("hasil laut di bawah 50000")).toBe(false);
+    expect(isSingleProductQuestion("ikan di atas 100000")).toBe(false);
+  });
+});
+
+describe("extractKeywords — membuang angka & kata filter (bukan keyword)", () => {
+  it("frasa harga murni → tanpa kata kunci", () => {
+    expect(extractKeywords("di bawah 50000")).toEqual([]);
+    expect(extractKeywords("di atas 50000")).toEqual([]);
+    expect(extractKeywords("maksimal 50 ribu")).toEqual([]);
+  });
+
+  it("kata filter lain (harga/stok/tersedia) tidak jadi keyword", () => {
+    expect(extractKeywords("harga stok tersedia")).toEqual([]);
+  });
+
+  it("subjek tetap jadi keyword (dibersihkan kemudian oleh pemanggil bila perlu)", () => {
+    expect(extractKeywords("hasil laut di bawah 50000")).toEqual(["hasil", "laut"]);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Fallback filter subjek+harga — daftar terfilter, bukan ringkasan    */
+/* ------------------------------------------------------------------ */
+
+const joran: AiProduct = {
+  id: "a1b2c3d4-1111-4222-8333-444455556666",
+  name: "Joran Tegek Carbon 4.5m",
+  price: 150000,
+  stock: 20,
+  image: null,
+  storeName: "Pancing Jaya Abadi",
+  categoryName: "Alat Pancing",
+  rating: 0,
+  ratingCount: 0,
+  status: "AVAILABLE",
+};
+
+const subjectHasilLaut: ProductFilter["subject"] = {
+  phrase: "hasil laut",
+  mode: "category",
+  value: "Hasil Laut",
+};
+
+describe("fallbackResult — filter subjek + harga (daftar terfilter, bukan ringkasan katalog)", () => {
+  it("'hasil laut di bawah 50000' → hanya produk hasil laut <50k, TANPA ringkasan katalog", () => {
+    const r = fallbackResult({
+      message: "hasil laut di bawah 50000",
+      products: [kerapu, cumi, minnow, joran],
+      sections: [catalogSection], // ringkasan katalog ADA di konteks tapi TIDAK boleh tampil
+      generatedAt: GEN_AT,
+      filters: { price: { max: 50000, maxExclusive: true }, subject: subjectHasilLaut },
+    });
+    expect(r.products.map((p) => p.name)).toEqual(["Cumi-cumi Ring Segar (500 gr)"]);
+    expect(r.reply).toContain("Cumi-cumi Ring Segar (500 gr)");
+    expect(r.reply).not.toContain("Ikan Kerapu");
+    expect(r.reply).not.toContain("Umpan Minnow");
+    expect(r.reply).not.toContain("Joran Tegek");
+    expect(r.reply).not.toContain("Ringkasan katalog");
+    expect(r.reply).not.toContain("Total produk");
+    expect(r.reply).toContain("di bawah Rp50.000");
+    expect(r.reply).toContain("Menampilkan 1 produk yang cocok");
+  });
+
+  it("'hasil laut di atas 50000' → hanya produk hasil laut >50k", () => {
+    const r = fallbackResult({
+      message: "hasil laut di atas 50000",
+      products: [kerapu, cumi, minnow, joran],
+      sections: [],
+      generatedAt: GEN_AT,
+      filters: { price: { min: 50000 }, subject: subjectHasilLaut },
+    });
+    expect(r.products.map((p) => p.name)).toEqual(["Ikan Kerapu Macan Segar (1 Kg)"]);
+    expect(r.reply).not.toContain("Cumi-cumi");
+    expect(r.reply).toContain("minimal Rp50.000");
+  });
+
+  it("subjek mode nama → hanya produk yang NAMANYA cocok (deskripsi kebetulan tidak ikut)", () => {
+    const r = fallbackResult({
+      message: "ikan di bawah 100000",
+      products: [kerapu, cumi, minnow],
+      sections: [],
+      generatedAt: GEN_AT,
+      filters: {
+        price: { max: 100000, maxExclusive: true },
+        subject: { phrase: "ikan", mode: "name", value: "ikan" },
+      },
+    });
+    // Minnow menyebut "ikan" di deskripsi tapi TIDAK di nama → tidak boleh muncul
+    expect(r.products.map((p) => p.name)).toEqual(["Ikan Kerapu Macan Segar (1 Kg)"]);
+    expect(r.reply).not.toContain("Umpan Minnow");
+  });
+
+  it("subjek + harga + toko digabung (AND) — contoh: toko Hasil Laut Pak Budi >50k", () => {
+    const r = fallbackResult({
+      message: "Hasil laut dari toko Hasil Laut Pak Budi di atas 50000",
+      products: [kerapu, cumi, minnow, joran],
+      sections: [],
+      generatedAt: GEN_AT,
+      filters: {
+        price: { min: 50000 },
+        subject: subjectHasilLaut,
+        store: "hasil laut pak budi",
+      },
+    });
+    expect(r.products.map((p) => p.name)).toEqual(["Ikan Kerapu Macan Segar (1 Kg)"]);
+  });
+
+  it("hasil kosong → 'tidak ada produk memenuhi filter' (BUKAN 'katalog kosong')", () => {
+    const r = fallbackResult({
+      message: "hasil laut di atas 900000",
+      products: [kerapu, cumi, minnow, joran],
+      sections: [catalogSection],
+      generatedAt: GEN_AT,
+      filters: { price: { min: 900000 }, subject: subjectHasilLaut },
+    });
+    expect(r.products).toEqual([]);
+    expect(r.reply).toContain("Tidak ada produk hasil laut yang memenuhi");
+    expect(r.reply).not.toContain("katalog kosong");
+    expect(r.reply).not.toContain("Total produk non-hidden");
+  });
+
+  it("subjek ambigu → minta klarifikasi pilihan kategori (bukan menebak)", () => {
+    const r = fallbackResult({
+      message: "hasil di bawah 50000",
+      products: [],
+      sections: [],
+      generatedAt: GEN_AT,
+      filters: { price: { max: 50000, maxExclusive: true } },
+      subjectAmbiguity: { phrase: "hasil", options: ["Hasil Laut", "Hasil Pantai"] },
+    });
+    expect(r.products).toEqual([]);
+    expect(r.reply).toContain("bisa merujuk ke beberapa kategori");
+    expect(r.reply).toContain("Hasil Laut");
+    expect(r.reply).toContain("Hasil Pantai");
+  });
+
+  it("pertanyaan hitungan + filter → jawaban HANYA angka (bukan daftar produk)", () => {
+    const countSection: ContextSection = {
+      key: "count",
+      label: 'Jumlah produk "hasil laut" sesuai filter (data aktual)',
+      scope: "publik",
+      asOf: GEN_AT,
+      text: "Saat ini terdapat 1 produk hasil laut dengan harga di bawah Rp50.000 di katalog.",
+    };
+    const r = fallbackResult({
+      message: "berapa jumlah produk hasil laut di bawah 50000?",
+      products: [cumi],
+      sections: [countSection],
+      generatedAt: GEN_AT,
+      filters: { price: { max: 50000, maxExclusive: true }, subject: subjectHasilLaut },
+    });
+    expect(r.reply).toContain("1 produk hasil laut");
+    expect(r.products).toEqual([]);
+    expect(r.reply).not.toContain("Ringkasan katalog");
   });
 });

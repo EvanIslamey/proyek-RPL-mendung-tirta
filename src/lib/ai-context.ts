@@ -21,11 +21,17 @@ import { prisma } from "./prisma";
 import {
   searchCatalog,
   findFocusProducts,
+  countCatalog,
   extractKeywords,
+  extractSubjectPhrase,
+  resolveProductSubject,
   parsePriceFilter,
   parseProductFilters,
+  describePriceFilterText,
+  isSingleProductQuestion,
   type AiProduct,
   type ProductFilter,
+  type ProductSubject,
 } from "./ai";
 import type { SafeUser } from "./auth";
 
@@ -62,6 +68,14 @@ export type ChatContext = {
   focusCandidates: AiProduct[];
   /** Pertanyaan lanjutan ("berapa harganya?") tanpa referensi jelas → klarifikasi. */
   ambiguousFollowUp: boolean;
+  /**
+   * Filter gabungan FINAL (harga, subjek, kategori, toko, stok, rating,
+   * sorting) — sudah termasuk subjek hasil resolve/retensi dari riwayat.
+   * Dipakai route untuk generateReply (satu sumber kebenaran).
+   */
+  filters: ProductFilter;
+  /** Frasa subjek ambigu antar kategori → wajib minta klarifikasi user. */
+  subjectAmbiguity?: { phrase: string; options: string[] };
   generatedAt: string;
 };
 
@@ -186,6 +200,11 @@ export function detectIntents(message: string): Set<ChatIntent> {
       "ada gak", "mau cari", "cari", "dijual",
     )
   ) {
+    intents.add("product");
+  }
+  // Filter harga/frasa kriteria ("di bawah 50000", "di atas 50000") juga
+  // merupakan pertanyaan berbasis produk — jangan jatuh ke intent lain.
+  if (parsePriceFilter(message)) {
     intents.add("product");
   }
   // Reviews/ulasan
@@ -698,6 +717,40 @@ async function fetchCountSection(
   };
 }
 
+/**
+ * Hitungan produk DENGAN filter gabungan (subjek/harga/kategori) — dipakai
+ * untuk pertanyaan seperti "berapa jumlah produk hasil laut?".
+ * Query memakai kondisi AND yang sama dengan pencarian produk (parameterized);
+ * error DB dilempar (bukan diubah jadi 0 atau hasil kosong).
+ */
+async function fetchFilteredCountSection(
+  kind: CountKind,
+  filters: ProductFilter,
+): Promise<ContextSection> {
+  const n = await countCatalog(filters, {
+    onlyAvailable: kind === "availableProducts",
+    outOfStock: kind === "outOfStockProducts",
+  });
+  const subj = filters.subject
+    ? ` ${filters.subject.phrase}`
+    : filters.category
+      ? ` kategori ${filters.category}`
+      : "";
+  const priceText = describePriceFilterText(filters.price);
+  const text =
+    n === 0
+      ? `Tidak ada produk${subj} yang memenuhi kriteria tersebut saat ini.`
+      : `Saat ini terdapat ${n} produk${subj}${priceText ? ` dengan harga ${priceText}` : ""} di katalog.`;
+
+  return {
+    key: "count",
+    label: `Jumlah produk${subj.trim() ? ` "${subj.trim()}"` : ""} sesuai filter (data aktual)`,
+    scope: "publik",
+    asOf: new Date().toISOString(),
+    text,
+  };
+}
+
 /** Informasi aplikasi statis (layanan, tentang kami, panduan) — tanpa DB. */
 async function fetchAppInfo(): Promise<ContextSection> {
   const text = [
@@ -722,7 +775,6 @@ async function fetchAppInfo(): Promise<ContextSection> {
  */
 async function fetchReviews(
   productIds: string[] | undefined,
-  message: string,
 ): Promise<ContextSection | null> {
   // Jika ada fokus produk → ambil ulasan produk itu; jika tidak → ulasan terbaru
   const where = productIds && productIds.length > 0
@@ -1051,18 +1103,24 @@ async function fetchProductsByIds(ids: string[]): Promise<AiProduct[]> {
  * sebelumnya (divalidasi ulang dari DB — bukan ingatan model).
  * Melempar bila DB gagal → route menangkap dan menjawab dengan pesan
  * "layanan data tidak tersedia" (tanpa stack trace).
- * 
- * Sekarang mendukung filter gabungan: harga, kategori, toko, ketersediaan,
- * rating, sorting — semuanya diekstrak dari bahasa alami dan diterapkan
- * di level database via ProductFilter.
+ *
+ * Filter gabungan (harga, subjek produk, kategori, toko, stok, rating,
+ * sorting) diekstrak dari bahasa alami; subjek divalidasi ke data kategori
+ * AKTUAL di database dan bisa direten dari riwayat ("di bawah 50000" setelah
+ * "hasil laut" tetap memakai subjek "hasil laut" selama relevan).
+ * Semua kondisi diterapkan sebagai AND di level database.
  */
 export async function buildChatContext(
   user: SafeUser,
   message: string,
-  opts?: { contextProductIds?: string[] },
+  opts?: {
+    contextProductIds?: string[];
+    /** Teks pesan user sebelumnya di sesi ini (retensi subjek/filter). */
+    recentUserMessages?: string[];
+  },
 ): Promise<ChatContext> {
-  const keywords = extractKeywords(message);
-  const filters = parseProductFilters(message);
+  const baseKeywords = extractKeywords(message);
+  const baseFilters = parseProductFilters(message);
   const intents = detectIntents(message);
   const countKinds = detectCountQuery(message);
   const hasCount = countKinds.length > 0;
@@ -1073,15 +1131,82 @@ export async function buildChatContext(
     intents.has("stats") || intents.has("appinfo") || intents.has("account") || hasCount;
   const catalogIntent =
     intents.has("product") || intents.has("lowstock") || intents.has("outofstock");
-  const catalogRelevant =
-    !strongNonCatalog && (catalogIntent || (keywords.length > 0 && !intents.has("order")));
 
-  // Cari produk dengan filter gabungan (bukan hanya PriceFilter lagi)
-  const hasAnyFilter = filters.price || filters.category || filters.store ||
-    filters.inStock !== undefined || filters.minRating !== undefined;
-  const products = catalogRelevant && (keywords.length > 0 || hasAnyFilter)
+  // Subjek produk — diekstrak dari frasa lalu divalidasi ke kategori aktual.
+  // Ikut di-resolve untuk pertanyaan hitungan berfilter ("berapa jumlah produk
+  // hasil laut?"), tapi TIDAK untuk intent akun/statistik/layanan.
+  const subjectAllowed =
+    !intents.has("stats") && !intents.has("appinfo") && !intents.has("account");
+  let subject: ProductSubject | null = null;
+  let subjectAmbiguity: { phrase: string; options: string[] } | undefined;
+  // true bila subjek datang dari retensi riwayat (bukan dari pesan sendiri) —
+  // retensi usang yang tidak menghasilkan produk akan dilepas kembali.
+  let subjectRetained = false;
+  if (subjectAllowed) {
+    const resolved = await resolveProductSubject(message);
+    if (resolved.ambiguous && resolved.ambiguous.length > 0) {
+      subjectAmbiguity = {
+        phrase: extractSubjectPhrase(message) ?? resolved.ambiguous[0],
+        options: resolved.ambiguous,
+      };
+    }
+    subject = resolved.subject;
+    // Retensi subjek dari riwayat: "di bawah 50000" setelah "hasil laut"
+    // memakai subjek "hasil laut" — selama pesan saat ini masih berupa
+    // filter harga dan topik tidak berpindah (strongNonCatalog sudah dicek).
+    if (!subject && !subjectAmbiguity && baseFilters.price) {
+      const previous = [...(opts?.recentUserMessages ?? [])].reverse().slice(0, 4);
+      for (const prev of previous) {
+        const prior = await resolveProductSubject(prev);
+        if (prior.subject) {
+          subject = prior.subject;
+          subjectRetained = true;
+          break;
+        }
+      }
+    }
+  }
+
+  const filters: ProductFilter = { ...baseFilters, subject: subject ?? undefined };
+  const hasAnyFilter = !!(
+    filters.price ||
+    filters.subject ||
+    filters.category ||
+    filters.store ||
+    filters.inStock !== undefined ||
+    filters.minRating !== undefined ||
+    filters.sortBy
+  );
+  const catalogRelevant =
+    !strongNonCatalog &&
+    !subjectAmbiguity &&
+    (catalogIntent || hasAnyFilter || (baseKeywords.length > 0 && !intents.has("order")));
+
+  // Kata kunci pencarian: buang kata yang sudah menjadi subjek/kategori —
+  // subjek dipakai sebagai kondisi AND ketat di database, bukan OR keyword.
+  const subjectWords = new Set(
+    [filters.subject?.phrase, filters.subject?.value, filters.category]
+      .filter((s): s is string => !!s)
+      .flatMap((s) => s.toLowerCase().split(/\s+/)),
+  );
+  const keywords = baseKeywords.filter((kw) => !subjectWords.has(kw));
+
+  // Cari produk dengan filter gabungan (subjek + harga + kriteria lain).
+  let products = catalogRelevant && (keywords.length > 0 || hasAnyFilter)
     ? await searchCatalog(keywords, filters)
     : [];
+  // Retensi riwayat yang tidak menghasilkan apa pun → lepas subjeknya agar
+  // jawaban melebar ke filter harga (jawaban jujur, bukan "tidak ada" usang).
+  // Subjek dari pesan sendiri TIDAK pernah dilepas (tetap ketat/jujur).
+  if (products.length === 0 && subjectRetained && filters.subject) {
+    filters.subject = undefined;
+    subjectRetained = false;
+    if (catalogRelevant) {
+      products = baseKeywords.length > 0
+        ? await searchCatalog(baseKeywords, filters)
+        : await searchCatalog([], filters);
+    }
+  }
 
   // Produk dari konteks percakapan sebelumnya (ID valid dari sesi yang sama,
   // divalidasi ulang dari DB — harga/stok terkini, bukan ingatan model).
@@ -1090,8 +1215,11 @@ export async function buildChatContext(
   // Fokus produk: nama produk yang cocok dengan keyword (toleran ILIKE).
   // - 1 cocok → fokus (jawab spesifik, bukan ringkasan seluruh katalog)
   // - ≥2 cocok → ambigu → minta klarifikasi
-  const focusMatches = catalogRelevant && keywords.length > 0
-    ? await findFocusProducts(keywords, filters)
+  // Dilewati saat filter harga aktif dan pertanyaan BUKAN atribut satu produk —
+  // user yang meminta filter ingin DAFTAR produk, bukan detail satu produk.
+  const skipFocus = !!filters.price && !isSingleProductQuestion(message);
+  const focusMatches = catalogRelevant && baseKeywords.length > 0 && !skipFocus
+    ? await findFocusProducts(baseKeywords, filters)
     : [];
   const focus = focusMatches.length === 1 ? focusMatches[0] : null;
   const focusCandidates = focus ? [] : focusMatches;
@@ -1115,18 +1243,34 @@ export async function buildChatContext(
   // Hitungan spesifik ("berapa jumlah penjual?") → jawaban HANYA entitas yang
   // ditanya. Diprioritaskan di atas ringkasan statistik umum; dilewati bila ada
   // fokus produk bernama (entitas spesifik > hitungan agregat).
+  // Hitungan produk DENGAN filter (subjek/harga) → query terfilter, bukan total umum.
   if (hasCount && !focusProduct && focusCandidates.length === 0) {
-    for (const kind of countKinds) jobs.push(fetchCountSection(user, kind, message));
+    for (const kind of countKinds) {
+      const productKind =
+        kind === "totalProducts" || kind === "availableProducts" || kind === "outOfStockProducts";
+      if (productKind && (filters.price || filters.subject || filters.category)) {
+        jobs.push(fetchFilteredCountSection(kind, filters));
+      } else {
+        jobs.push(fetchCountSection(user, kind, message));
+      }
+    }
   }
-  // Ringkasan katalog hanya bila TIDAK sedang fokus ke produk tertentu
-  // (pertanyaan satu produk tidak perlu ringkasan seluruh katalog).
-  if (catalogRelevant && !focusProduct && focusCandidates.length === 0 && !ambiguousFollowUp) {
+  // Ringkasan katalog hanya bila TIDAK sedang fokus ke produk tertentu dan
+  // TIDAK sedang memfilter (pertanyaan berfilter menampilkan daftar terfilter,
+  // jangan dibumbui ringkasan seluruh katalog).
+  if (
+    catalogRelevant &&
+    !focusProduct &&
+    focusCandidates.length === 0 &&
+    !ambiguousFollowUp &&
+    !hasAnyFilter
+  ) {
     jobs.push(fetchCatalogSummary()); // "kosong" vs "habis" tidak tertukar
   }
   // Ulasan — bila intent reviews atau ada fokus produk
   if (intents.has("reviews") || focusProduct) {
     const focusIds = focusProduct ? [focusProduct.id] : focusCandidates.slice(0, 2).map((p) => p.id);
-    jobs.push(fetchReviews(focusIds.length > 0 ? focusIds : undefined, message));
+    jobs.push(fetchReviews(focusIds.length > 0 ? focusIds : undefined));
   }
   // Daftar pesanan dilewati bila yang ditanya JUMLUHnya (hitungan menang).
   if (intents.has("order") && !(hasCount && countKinds.includes("orders"))) jobs.push(fetchOrders(user));
@@ -1165,6 +1309,8 @@ export async function buildChatContext(
     focus: focusProduct,
     focusCandidates,
     ambiguousFollowUp,
+    filters,
+    subjectAmbiguity,
     generatedAt: new Date().toISOString(),
   };
 }

@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 import { requireUser } from "@/lib/auth";
-import { generateReply, parseProductFilters, type AiChatMessage } from "@/lib/ai";
+import { generateReply, type AiChatMessage } from "@/lib/ai";
 import { buildChatContext } from "@/lib/ai-context";
 import { hitRateLimit } from "@/lib/rate-limit";
 import { ApiError, assertSameOrigin, parseJsonBody } from "@/lib/validate";
@@ -36,6 +36,7 @@ export async function POST(request: NextRequest) {
 
     let history: AiChatMessage[] = [];
     const contextProductIds: string[] = [];
+    const recentUserMessages: string[] = [];
     if (Array.isArray(body.history)) {
       history = body.history
         .filter(
@@ -62,6 +63,12 @@ export async function POST(request: NextRequest) {
               }
             }
           }
+          // Simpan teks pesan user sebelumnya (maks 4) — untuk retensi
+          // subjek filter ("di bawah 50000" setelah "hasil laut").
+          if (h.role === "user") {
+            recentUserMessages.push((h as { content: string }).content);
+            if (recentUserMessages.length > 4) recentUserMessages.shift();
+          }
           return {
             role: h.role as "user" | "assistant",
             content: h.content.slice(0, 2000),
@@ -72,7 +79,10 @@ export async function POST(request: NextRequest) {
     // 1. Grounding: query terkini dari DB, discoping peran sesi login.
     let context;
     try {
-      context = await buildChatContext(user, message, { contextProductIds });
+      context = await buildChatContext(user, message, {
+        contextProductIds,
+        recentUserMessages,
+      });
     } catch (dbErr) {
       // DB tidak tersedia → jawab ramah tanpa stack trace (A5).
       console.error(
@@ -89,10 +99,8 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Parse filter gabungan dari pesan untuk konteks AI
-    const filters = parseProductFilters(message);
-
     // 2. Balasan (AI bila provider berhasil, fallback berbasis data bila tidak).
+    //    filters = filter FINAL dari konteks (termasuk subjek hasil resolve/retensi).
     const result = await generateReply({
       message,
       history,
@@ -102,7 +110,8 @@ export async function POST(request: NextRequest) {
       focus: context.focus,
       focusCandidates: context.focusCandidates,
       ambiguousFollowUp: context.ambiguousFollowUp,
-      filters,
+      filters: context.filters,
+      subjectAmbiguity: context.subjectAmbiguity,
     });
 
     return Response.json(result);

@@ -294,3 +294,33 @@ describe("queryCountData — query aktual & error tidak menjadi angka 0", () => 
     ).rejects.toThrow("db down");
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Intent filter harga & hitungan berfilter subjek                     */
+/* ------------------------------------------------------------------ */
+
+describe("intent produk dari filter harga & hitungan berfilter subjek", () => {
+  it("'di bawah 50000' / 'di atas 50000' (tanpa kata 'produk') → intent product", () => {
+    expect(detectIntents("di bawah 50000").has("product")).toBe(true);
+    expect(detectIntents("di atas 50000").has("product")).toBe(true);
+    expect(detectIntents("umpan di bawah 75000").has("product")).toBe(true);
+  });
+
+  it("'berapa jumlah produk hasil laut?' → hitungan totalProducts (bukan listing/istirahat)", () => {
+    expect(detectCountQuery("berapa jumlah produk hasil laut?")).toEqual(["totalProducts"]);
+    expect(detectIntents("berapa jumlah produk hasil laut?").has("count")).toBe(true);
+  });
+
+  it("hitungan dengan subjek DAN filter harga tetap intent count (bukan pencarian biasa)", () => {
+    const intents = detectIntents("berapa jumlah produk hasil laut di bawah 50000?");
+    expect(intents.has("count")).toBe(true);
+    expect(detectCountQuery("berapa jumlah produk hasil laut di bawah 50000?")).toEqual([
+      "totalProducts",
+    ]);
+  });
+
+  it("pertanyaan atribut produk tetap bukan hitungan", () => {
+    expect(detectCountQuery("berapa harga ikan kerapu?")).toEqual([]);
+    expect(detectCountQuery("berapa stok ikan kerapu?")).toEqual([]);
+  });
+});

@@ -25,6 +25,14 @@ const STOPWORDS = new Set([
   "kak", "min", "sy", "saya", "gimana", "bagaimana", "kenapa", "kapan",
   "berapa", "mahal", "murah", "yang", "dari", "ke", "di", "ke", "pada",
   "adalah", "akan", "banyak", "semua", "lagi", "juga", "pakai", "buat",
+  // Kata filter/kriteria — bukan kata kunci pencarian produk (menjadi
+  // kondisi filter terstruktur, jangan dipakai sebagai ILIKE keyword).
+  "harga", "atas", "bawah", "lebih", "kurang", "maksimal", "maks", "maksimum",
+  "minimum", "minimal", "ribu", "juta", "rp", "antara", "sampai", "hingga",
+  "termurah", "termahal", "urutkan", "urut", "stok", "tersedia", "ready",
+  "habis", "masih", "kategori", "jenis", "toko", "penjual", "produk",
+  "cari", "carikan", "mau", "beli", "jual", "adakah", "nggak", "dong",
+  "donk", "nih", "rating", "bintang", "ulasan", "review", "komentar",
 ]);
 
 export type AiChatMessage = { role: "user" | "assistant"; content: string };
@@ -79,9 +87,23 @@ export type PriceFilter = {
   maxExclusive?: boolean; // true = < max, false = <= max
 };
 
+/**
+ * Subjek/jenis produk dari pesan user ("hasil laut", "ikan", "umpan", …).
+ * - mode "category": frasa cocok dengan nama kategori AKTUAL di database
+ *   (diketahui dari tabel Category, bukan daftar kata manual).
+ * - mode "name": frasa jadi filter ketat pada nama produk (AND) — jika tidak
+ *   ada produk yang namanya mengandung frasa → hasil kosong yang jujur.
+ */
+export type ProductSubject = {
+  phrase: string; // frasa subjek apa adanya (untuk ditampilkan di jawaban)
+  mode: "category" | "name";
+  value: string; // nilai ILIKE: nama kategori atau term nama produk
+};
+
 /** Filter gabungan untuk pencarian produk (multi-kriteria). */
 export type ProductFilter = {
   price?: PriceFilter;
+  subject?: ProductSubject; // subjek produk (AND dengan filter lain)
   category?: string; // nama kategori (ILIKE)
   store?: string; // nama toko (ILIKE)
   inStock?: boolean; // true = hanya yang tersedia (AVAILABLE & stok>0)
@@ -155,6 +177,8 @@ export function parseMinRating(message: string): number | null {
 
 /**
  * Kombinasikan semua filter dari pesan user menjadi satu objek ProductFilter.
+ * Catatan: filter `subject` (subjek produk) butuh validasi data kategori
+ * aktual di database — diresolve terpisah oleh resolveProductSubject().
  */
 export function parseProductFilters(message: string): ProductFilter {
   const filters: ProductFilter = {};
@@ -166,6 +190,160 @@ export function parseProductFilters(message: string): ProductFilter {
   filters.minRating = parseMinRating(message) ?? undefined;
   filters.sortBy = parseSortOrder(message) ?? undefined;
   return filters;
+}
+
+/* ------------------------------------------------------------------ */
+/* Subjek produk — ekstraksi dari frasa, validasi ke data aplikasi.    */
+/* ------------------------------------------------------------------ */
+
+/** Kata pengisi yang tidak pernah menjadi subjek/jenis produk. */
+const SUBJECT_FILLERS = new Set([
+  "produk", "barang", "item", "kategori", "jenis", "tipe", "daftar", "list",
+  "cari", "carikan", "mencari", "mau", "ingin", "beli", "belikan", "jual",
+  "jualkan", "adakah", "ada", "tersedia", "ready", "stok", "masih", "harga",
+  "rp", "murah", "mahal", "termurah", "termahal", "yang", "untuk", "dengan",
+  "ini", "itu", "dong", "donk", "nih", "ya", "yah", "kah", "pak", "bu",
+  "kak", "min", "mas", "mbak", "tolong", "mohon", "permisi", "sebutkan",
+  "tampilkan", "perlihatkan", "semua", "seluruh", "lengkap", "rekomendasi",
+  "rekomen", "rekom", "bagus", "terbaik", "bisa", "boleh", "saya", "aku",
+  "kami", "kita", "nya", "di", "ke", "dari", "pada", "dan", "atau",
+  "bawah", "atas", "lebih", "kurang", "maksimal", "maks", "minimal",
+  "minimum", "antara", "sampai", "hingga", "ribu", "juta", "habis",
+  "tersisa", "sedikit", "menipis", "rating", "bintang", "skor", "ulasan",
+  "review", "komentar", "penilaian", "urutkan", "urut", "sort", "baru",
+  "terbaru", "berapa", "jumlah", "seberapa", "banyak", "sebanyak", "total",
+  "cara", "belanja", "layanan", "tentang", "panduan", "bantuan", "gimana",
+  "bagaimana", "kapan", "dimana", "siapa", "kenapa", "tolong", "saja",
+  // Kata entitas peran/bisnis — bukan jenis produk.
+  "penjual", "pembeli", "pengguna", "admin", "seller", "buyer", "toko",
+  "akun", "profil", "pesanan", "order", "penjualan", "statistik", "rekap",
+]);
+
+/**
+ * Ekstraksi SUBJEK produk dari pesan (murni, tanpa DB — untuk unit test).
+ * Frasa filter harga/range, toko, sorting, rating, dan ketersediaan dibuang
+ * lebih dulu supaya angka/operator tidak ikut jadi subjek.
+ *
+ * Contoh:
+ * - "Produk hasil laut di bawah 50000" → "hasil laut"
+ * - "Ikan yang masih tersedia di bawah 100000" → "ikan"
+ * - "Hasil laut dari toko Hasil Laut Pak Budi di atas 50000" → "hasil laut"
+ * - "di bawah 50000" → null (tanpa subjek)
+ */
+export function extractSubjectPhrase(message: string): string | null {
+  let m = message.toLowerCase();
+  // 1. Buang frasa harga/rentang (angka + operator).
+  m = m.replace(/antara\s+\S+\s+(?:dan|ke|sampai)\s+\S+/g, " ");
+  m = m.replace(
+    /(?:rp\s*[\d.,]+\s*(?:ribu|juta)?|\d[\d.,]*(?:\s*(?:ribu|juta))?)\s*(?:-|–|sampai|sd|s\/d|hingga)\s+(?:rp\s*[\d.,]+\s*(?:ribu|juta)?|\d[\d.,]*(?:\s*(?:ribu|juta))?)/g,
+    " ",
+  );
+  m = m.replace(
+    /(?:di\s*(?:atas|bawah)|lebih\s+dari|kurang\s+dari|maksimal|maks|seluruhnya|min(?:imum|imal)?\.?|below|above)\s+(?:rp\s*[\d.,]+\s*(?:ribu|juta)?|\d[\d.,]*(?:\s*(?:ribu|juta))?)/g,
+    " ",
+  );
+  m = m.replace(/(?:rp\s*[\d.,]+|\d[\d.,]*)\s*(?:ribu|juta)\b/g, " ");
+  m = m.replace(/\d+/g, " ");
+  // 2. Buang frasa toko/penjual, sorting, rating, ketersediaan.
+  m = m.replace(
+    /(?:dari\s+)?(?:toko|penjual|seller|store)\s+[\w\s-]+?(?=\s+(?:yang|dengan|harga|di|untuk|adalah)|[.!?]|$)/g,
+    " ",
+  );
+  m = m.replace(/\b(?:termurah|termahal|urutkan|urut|sort)\b/g, " ");
+  m = m.replace(
+    /\b(?:rating|bintang|skor)\s+(?:di\s+atas|>=|≥|minimal|min\.?|lebih\s+dari)?\s*[\d.]+/g,
+    " ",
+  );
+  m = m.replace(
+    /\b(?:yang\s+)?(?:masih\s+)?(?:tersedia|ready|ada\s+stok|stok\s+ada|masih\s+ada|habis|sold\s*out|tidak\s+tersedia)\b/g,
+    " ",
+  );
+  // 3. Sisa kata bermakna = frasa subjek.
+  m = m.replace(/[^\p{L}\p{N}\s-]/gu, " ");
+  const words = m
+    .split(/\s+/)
+    .filter((w) => w && w.length > 1 && !SUBJECT_FILLERS.has(w) && !/^\d+$/.test(w));
+  if (words.length === 0) return null;
+  return words.slice(0, 4).join(" ").trim();
+}
+
+/**
+ * Sinonim aman → nilai kanonis. Hanya dipetakan ke entitas yang ada di
+ * database Mendung Tirta (kategori "Hasil Laut"/"Alat Pancing"/"Umpan" atau
+ * term nama produk aktual seperti "ikan"/"cumi"/"udang"). Validasi akhir
+ * tetap terhadap daftar kategori aktual di resolveProductSubject().
+ */
+const SUBJECT_SYNONYMS: Record<string, string> = {
+  "ikan": "ikan", "ikan segar": "ikan", "ikan laut": "ikan",
+  "cumi": "cumi", "cumi-cumi": "cumi", "cumi cumi": "cumi", "sotong": "cumi",
+  "udang": "udang", "kepiting": "kepiting", "kerang": "kerang", "gurita": "gurita",
+  "seafood": "hasil laut", "hasil pantai": "hasil laut",
+  "alat pancing": "alat pancing", "alat pancingan": "alat pancing",
+  "pancing": "alat pancing", "fishing": "alat pancing", "fishing gear": "alat pancing",
+  "umpan": "umpan", "umpan ikan": "umpan", "umpan pancing": "umpan",
+  "pelet": "umpan", "lure": "umpan",
+  "joran": "joran", "reel": "reel", "kail": "kail", "pancingan": "joran",
+};
+
+/** Normalisasi frasa subjek lewat sinonim aman (murni, untuk unit test). */
+export function canonicalSubject(phrase: string): string {
+  const key = phrase.toLowerCase().trim();
+  return SUBJECT_SYNONYMS[key] ?? key;
+}
+
+/**
+ * Cocokkan frasa subjek ke daftar nama kategori AKTUAL (murni, tanpa DB):
+ * - exact match menang; parsial "kedua arah" (frasa mengandung nama kategori
+ *   atau sebaliknya) ditangani setelahnya.
+ * - >1 kandidat → ambiguous (pemanggil wajib minta klarifikasi, jangan menebak).
+ */
+export function matchSubjectToCategories(
+  phrase: string,
+  categoryNames: string[],
+): { value: string } | { ambiguous: string[] } | null {
+  const p = phrase.toLowerCase().trim();
+  if (!p) return null;
+  const norm = categoryNames.map((orig) => ({ orig, n: orig.toLowerCase().trim() }));
+  const exact = norm.filter((c) => c.n === p);
+  if (exact.length === 1) return { value: exact[0].orig };
+  if (exact.length > 1) return { ambiguous: exact.map((c) => c.orig) };
+  const partial = norm.filter((c) => c.n.includes(p) || p.includes(c.n));
+  if (partial.length === 1) return { value: partial[0].orig };
+  if (partial.length > 1) return { ambiguous: partial.map((c) => c.orig) };
+  return null;
+}
+
+/** Cache daftar kategori (tabel kecil, jarang berubah) — 60 detik. */
+let categoryCache: { names: string[]; at: number } | null = null;
+async function getCategoryNames(): Promise<string[]> {
+  if (categoryCache && Date.now() - categoryCache.at < 60_000) return categoryCache.names;
+  const rows = await prisma.category.findMany({ select: { name: true }, orderBy: { name: "asc" } });
+  categoryCache = { names: rows.map((r) => r.name), at: Date.now() };
+  return categoryCache.names;
+}
+
+/**
+ * Resolve subjek produk dari pesan: ekstraksi frasa → cocokkan ke kategori
+ * aktual di database (tabel Category) → sinonim aman → fallback mode "name"
+ * (filter ketat nama produk). Mengembalikan ambiguous bila frasa bisa berarti
+ * beberapa kategori — pemanggil wajib minta klarifikasi (jangan menebak).
+ * Melempar bila DB gagal → route menjawab pesan gangguan data.
+ */
+export async function resolveProductSubject(
+  message: string,
+): Promise<{ subject: ProductSubject | null; ambiguous?: string[] }> {
+  const phrase = extractSubjectPhrase(message);
+  if (!phrase) return { subject: null };
+
+  const names = await getCategoryNames();
+  const canon = canonicalSubject(phrase);
+  const match =
+    matchSubjectToCategories(canon, names) ?? matchSubjectToCategories(phrase, names);
+  if (match && "ambiguous" in match) return { subject: null, ambiguous: match.ambiguous };
+  if (match) return { subject: { phrase, mode: "category", value: match.value } };
+  // Tidak ada kategori yang cocok → filter ketat pada nama produk
+  // ("udang" misalnya → hasil jujur: kosong bila memang tidak ada produknya).
+  return { subject: { phrase, mode: "name", value: canon } };
 }
 
 /**
@@ -315,15 +493,54 @@ export function extractKeywords(message: string): string[] {
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s-]/gu, " ")
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOPWORDS.has(w));
+    // Angka murni dibuang — harga/rentang sudah jadi filter terstruktur.
+    .filter((w) => w.length > 2 && !STOPWORDS.has(w) && !/^\d+$/.test(w));
   return [...new Set(words)].slice(0, 6);
+}
+
+/**
+ * Kondisi filter terparameterisasi (harga, kategori, toko, rating, subjek) —
+ * SATU helper dipakai searchCatalog, findFocusProducts, dan countCatalog
+ * sehingga semua jalur memakai semantik AND yang sama dan tidak duplikat.
+ * Parameter seluruhnya binding Prisma.sql (aman dari SQL injection).
+ */
+function filterConds(pf: ProductFilter): Prisma.Sql[] {
+  const conds: Prisma.Sql[] = [];
+  // Filter harga
+  if (pf.price?.min !== undefined) conds.push(Prisma.sql`p.price >= ${pf.price.min}`);
+  if (pf.price?.max !== undefined) {
+    conds.push(
+      pf.price.maxExclusive
+        ? Prisma.sql`p.price < ${pf.price.max}`
+        : Prisma.sql`p.price <= ${pf.price.max}`,
+    );
+  }
+  // Filter kategori eksplisit ("kategori umpan")
+  if (pf.category) conds.push(Prisma.sql`c.name ILIKE ${"%" + pf.category + "%"}`);
+  // Filter toko
+  if (pf.store) conds.push(Prisma.sql`s."storeName" ILIKE ${"%" + pf.store + "%"}`);
+  // Filter rating minimal
+  if (pf.minRating !== undefined) {
+    conds.push(Prisma.sql`COALESCE(r."ratingAvg", 0) >= ${pf.minRating}`);
+  }
+  // Subjek produk — mode kategori (data tabel Category) atau mode nama
+  // produk ketat (AND). Tidak menyentuh deskripsi agar produk yang kebetulan
+  // mengandung kata mirip tidak ikut masuk.
+  if (pf.subject) {
+    conds.push(
+      pf.subject.mode === "category"
+        ? Prisma.sql`c.name ILIKE ${"%" + pf.subject.value + "%"}`
+        : Prisma.sql`p.name ILIKE ${"%" + pf.subject.value + "%"}`,
+    );
+  }
+  return conds;
 }
 
 /**
  * Cari produk nyata di DB untuk grounding jawaban AI.
  * Parameter seluruhnya lewat binding Prisma.sql (aman dari SQL injection).
  * Sekarang mendukung filter gabungan: harga, kategori, toko, ketersediaan,
- * rating minimal, dan sorting — semua diterapkan di level database.
+ * rating minimal, subjek produk, dan sorting — semua diterapkan di level database.
  * 
  * Mendukung typo tolerance via ILIKE (case-insensitive partial match).
  */
@@ -337,7 +554,13 @@ export async function searchCatalog(
     ? { price: filters as PriceFilter }
     : (filters as ProductFilter | undefined) ?? {};
 
-  if (keywords.length === 0 && !pf.price && !pf.category && !pf.store && pf.inStock === undefined && !pf.minRating) return [];
+  if (
+    keywords.length === 0 &&
+    !pf.price && !pf.category && !pf.store && !pf.subject &&
+    pf.inStock === undefined && !pf.minRating && !pf.sortBy
+  ) {
+    return [];
+  }
 
   // Kata kunci match (OR antar kata, toleran typo via ILIKE)
   const keywordConds = keywords.map(
@@ -345,41 +568,16 @@ export async function searchCatalog(
   );
   const keywordMatch = keywordConds.length > 0 ? Prisma.join(keywordConds, " OR ") : Prisma.sql`true`;
 
-  // Filter harga
-  const priceConds: Prisma.Sql[] = [];
-  if (pf.price?.min !== undefined) {
-    priceConds.push(Prisma.sql`p.price >= ${pf.price.min}`);
-  }
-  if (pf.price?.max !== undefined) {
-    if (pf.price.maxExclusive) {
-      priceConds.push(Prisma.sql`p.price < ${pf.price.max}`);
-    } else {
-      priceConds.push(Prisma.sql`p.price <= ${pf.price.max}`);
-    }
-  }
-  const priceMatch = priceConds.length > 0 ? Prisma.join(priceConds, " AND ") : Prisma.sql`true`;
+  // Filter gabungan (semua kondisi AND — termasuk subjek produk).
+  const filterParts = filterConds(pf);
 
-  // Filter kategori
-  const categoryMatch = pf.category
-    ? Prisma.sql`c.name ILIKE ${"%" + pf.category + "%"}`
-    : Prisma.sql`true`;
-
-  // Filter toko
-  const storeMatch = pf.store
-    ? Prisma.sql`s."storeName" ILIKE ${"%" + pf.store + "%"}`
-    : Prisma.sql`true`;
-
-  // Filter ketersediaan
+  // Visibilitas stok — DIBUNGKUS kurung agar tidak bocor ke kondisi lain
+  // saat digabung AND (klausa OR tanpa kurung membuat filter lain terlewati).
   const stockMatch = pf.inStock === true
-    ? Prisma.sql`p.status = 'AVAILABLE' AND p.stock > 0`
+    ? Prisma.sql`(p.status = 'AVAILABLE' AND p.stock > 0)`
     : pf.inStock === false
-      ? Prisma.sql`(p.status = 'OUT_OF_STOCK' OR p.stock <= 0)`
-      : Prisma.sql`true`;
-
-  // Filter rating minimal
-  const ratingMatch = pf.minRating !== undefined
-    ? Prisma.sql`COALESCE(r."ratingAvg", 0) >= ${pf.minRating}`
-    : Prisma.sql`true`;
+      ? Prisma.sql`(p.status <> 'HIDDEN' AND (p.status = 'OUT_OF_STOCK' OR p.stock <= 0))`
+      : Prisma.sql`(p.status <> 'HIDDEN')`;
 
   // Sorting
   let orderBy: Prisma.Sql;
@@ -405,14 +603,7 @@ export async function searchCatalog(
   }
 
   // Query utama: semua filter digabung dengan AND
-  const whereClauses = [
-    pf.inStock === undefined ? Prisma.sql`(p.status = 'AVAILABLE' AND p.stock > 0) OR (p.status <> 'HIDDEN')` : stockMatch,
-    keywordMatch,
-    priceMatch,
-    categoryMatch,
-    storeMatch,
-    ratingMatch,
-  ];
+  const whereClauses = [stockMatch, keywordMatch, ...filterParts];
   const where = Prisma.join(whereClauses, " AND ");
 
   const rows = await prisma.$queryRaw<ProductRow[]>(Prisma.sql`
@@ -435,10 +626,7 @@ export async function searchCatalog(
 
   // Jika keyword tidak match, coba pencarian longgar (hanya filter non-keyword)
   if (rows.length === 0 && keywords.length > 0) {
-    const looseWhere = Prisma.join(
-      [stockMatch, priceMatch, categoryMatch, storeMatch, ratingMatch],
-      " AND ",
-    );
+    const looseWhere = Prisma.join([stockMatch, ...filterParts], " AND ");
     const looseRows = await prisma.$queryRaw<ProductRow[]>(Prisma.sql`
       SELECT p.id, p.name, p.price::float AS price, p.stock, p.image,
              s."storeName" AS "storeName", c.name AS "categoryName",
@@ -487,36 +675,10 @@ export async function findFocusProducts(
   );
   const match = conds.length > 0 ? Prisma.join(conds, " OR ") : Prisma.sql`true`;
 
-  // Filter harga
-  const priceConds: Prisma.Sql[] = [];
-  if (pf.price?.min !== undefined) {
-    priceConds.push(Prisma.sql`p.price >= ${pf.price.min}`);
-  }
-  if (pf.price?.max !== undefined) {
-    if (pf.price.maxExclusive) {
-      priceConds.push(Prisma.sql`p.price < ${pf.price.max}`);
-    } else {
-      priceConds.push(Prisma.sql`p.price <= ${pf.price.max}`);
-    }
-  }
-  const priceMatch = priceConds.length > 0 ? Prisma.join(priceConds, " AND ") : Prisma.sql`true`;
+  // Filter gabungan (harga, kategori, toko, rating, subjek) — helper bersama.
+  const filterParts = filterConds(pf);
 
-  // Filter kategori
-  const categoryMatch = pf.category
-    ? Prisma.sql`c.name ILIKE ${"%" + pf.category + "%"}`
-    : Prisma.sql`true`;
-
-  // Filter toko
-  const storeMatch = pf.store
-    ? Prisma.sql`s."storeName" ILIKE ${"%" + pf.store + "%"}`
-    : Prisma.sql`true`;
-
-  // Filter rating minimal
-  const ratingMatch = pf.minRating !== undefined
-    ? Prisma.sql`COALESCE(r."ratingAvg", 0) >= ${pf.minRating}`
-    : Prisma.sql`true`;
-
-  const where = Prisma.join([match, priceMatch, categoryMatch, storeMatch, ratingMatch], " AND ");
+  const where = Prisma.join([match, ...filterParts], " AND ");
 
   const rows = await prisma.$queryRaw<ProductRow[]>(Prisma.sql`
     SELECT p.id, p.name, p.price::float AS price, p.stock, p.image,
@@ -538,6 +700,71 @@ export async function findFocusProducts(
   `);
 
   return rows.map(toAiProduct);
+}
+
+/**
+ * Hitung produk sesuai filter gabungan — parameterized, kondisi sama persis
+ * dengan searchCatalog (dipakai untuk pertanyaan jumlah dengan subjek/filter,
+ * mis. "berapa jumlah produk hasil laut?"). Error DB dilempar (bukan 0).
+ */
+export async function countCatalog(
+  filters: ProductFilter,
+  opts?: { onlyAvailable?: boolean; outOfStock?: boolean },
+): Promise<number> {
+  const visibility = opts?.onlyAvailable
+    ? Prisma.sql`p.status = 'AVAILABLE' AND p.stock > 0`
+    : opts?.outOfStock
+      ? Prisma.sql`p.status <> 'HIDDEN' AND (p.status = 'OUT_OF_STOCK' OR p.stock <= 0)`
+      : Prisma.sql`p.status <> 'HIDDEN'`;
+  const where = Prisma.join([visibility, ...filterConds(filters)], " AND ");
+  const rows = await prisma.$queryRaw<{ n: string | number }[]>(Prisma.sql`
+    SELECT COUNT(*) AS n
+    FROM "Product" p
+    JOIN "Store" s ON s.id = p."storeId" AND s."isActive" = true
+    JOIN "Category" c ON c.id = p."categoryId"
+    LEFT JOIN (
+      SELECT "productId", AVG(rating) AS "ratingAvg"
+      FROM "Review" GROUP BY "productId"
+    ) r ON r."productId" = p.id
+    WHERE ${where}
+  `);
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** Deskripsi filter harga untuk jawaban ("di bawah Rp50.000", dst.). */
+export function describePriceFilterText(pf: PriceFilter | undefined): string | null {
+  if (!pf) return null;
+  const rp = (n: number) => `Rp${n.toLocaleString("id-ID")}`;
+  if (pf.min !== undefined && pf.max !== undefined) return `antara ${rp(pf.min)} dan ${rp(pf.max)}`;
+  if (pf.max !== undefined) return pf.maxExclusive ? `di bawah ${rp(pf.max)}` : `maksimal ${rp(pf.max)}`;
+  if (pf.min !== undefined) return `minimal ${rp(pf.min)}`;
+  return null;
+}
+
+/**
+ * Tautan katalog dengan filter aktif — halaman /products mendukung param
+ * q/kategori/minHarga/maxHarga/tersedia (sama dengan filter chatbot).
+ */
+export function catalogProductLink(filters: ProductFilter): string | null {
+  const params = new URLSearchParams();
+  const kategori = filters.category ?? (filters.subject?.mode === "category" ? filters.subject.value : undefined);
+  if (kategori) params.set("kategori", kategori);
+  if (filters.price?.min !== undefined) params.set("minHarga", String(filters.price.min));
+  if (filters.price?.max !== undefined) params.set("maxHarga", String(filters.price.max));
+  if (filters.inStock === true) params.set("tersedia", "1");
+  if (filters.subject?.mode === "name" && !filters.store) params.set("q", filters.subject.value);
+  const qs = params.toString();
+  return qs ? `/products?${qs}` : null;
+}
+
+/**
+ * Pertanyaan atribut SATU produk ("berapa harganya?", "stok ikan kerapu?") —
+ * dijawab fokus detail produk, bukan daftar filter.
+ */
+export function isSingleProductQuestion(message: string): boolean {
+  return /\bharganya\b|\bstoknya\b|berapa harga|berapa stok|stoknya berapa|harganya berapa|\bulasan\b|\breviews?\b|ratingnya|komentarnya/i.test(
+    message.toLowerCase(),
+  );
 }
 
 /** Format daftar produk untuk disertakan ke prompt model. */
@@ -586,6 +813,9 @@ const SYSTEM_PROMPT = [
   "24. Untuk pertanyaan rating minimal ('rating di atas 4', 'bintang 4 ke atas'), filter rating SUDAH diterapkan — hanya tampilkan produk yang memenuhi.",
   "25. Untuk pertanyaan ulasan ('ulasan produk X', 'review ikan kerapu'), jawab dari section 'Ulasan produk' — sebutkan rating dan komentar yang ada, jangan mengarang ulasan.",
   "26. Saat user menyebut produk dengan typo ringan (mis. 'krapu' untuk 'kerapu'), tetap proses pencarian dengan normal — ILIKE sudah menangani toleransi typo parsial.",
+  "27. Bila user meminta produk dengan subjek/jenis DAN filter harga (mis. 'hasil laut di bawah 50000'), filter gabungan SUDAH diterapkan di database (AND). Tampilkan HANYA daftar produk yang dikirim beserta jumlah yang cocok — JANGAN menampilkan ringkasan katalog atau statistik lain. Bila hasilnya kosong, katakan tidak ada produk yang memenuhi filter tersebut (bukan 'katalog kosong').",
+  "28. Bila pertanyaan hitungan menyertakan subjek/filter (mis. 'berapa jumlah produk hasil laut?'), angka pada section 'Jumlah … (data aktual)' sudah dihitung dengan filter itu — jawab hanya angkanya.",
+  "29. Bila konteks memuat baris 'SUBJEK PRODUK AMBIGUOUS', frasa user bisa berarti beberapa kategori — tanyakan pilihan kategori itu kepada user sebelum menampilkan produk.",
 ].join("\n");
 
 /** Format section konteks per-peran + katalog untuk prompt model. */
@@ -596,6 +826,7 @@ function contextForPrompt(
   focus: AiProduct | null,
   focusCandidates: AiProduct[],
   filters?: ProductFilter,
+  subjectAmbiguity?: { phrase: string; options: string[] },
 ): string {
   const parts = sections.map((s) => {
     const head =
@@ -629,11 +860,16 @@ function contextForPrompt(
   parts.push(`KATALOG:\n${catalogForPrompt(products)}`);
   
   // Sertakan info filter aktif agar AI tahu filter apa yang sudah diterapkan
-  if (filters && (filters.price || filters.category || filters.store || filters.inStock !== undefined || filters.minRating !== undefined || filters.sortBy)) {
+  if (filters && (filters.price || filters.subject || filters.category || filters.store || filters.inStock !== undefined || filters.minRating !== undefined || filters.sortBy)) {
     const filterDesc: string[] = [];
     if (filters.price) {
       if (filters.price.min !== undefined) filterDesc.push(`min=Rp${filters.price.min.toLocaleString("id-ID")}`);
       if (filters.price.max !== undefined) filterDesc.push(`max=Rp${filters.price.max.toLocaleString("id-ID")}${filters.price.maxExclusive ? " (eksklusif)" : " (inklusif)"}`);
+    }
+    if (filters.subject) {
+      filterDesc.push(
+        `subjek="${filters.subject.phrase}" (mode ${filters.subject.mode} → "${filters.subject.value}")`,
+      );
     }
     if (filters.category) filterDesc.push(`kategori="${filters.category}"`);
     if (filters.store) filterDesc.push(`toko="${filters.store}"`);
@@ -645,7 +881,13 @@ function contextForPrompt(
       parts.push(`FILTER AKTIF (sudah diterapkan di database — JANGAN tambahkan produk di luar filter ini):\n${filterDesc.join("; ")}`);
     }
   }
-  
+  if (subjectAmbiguity && subjectAmbiguity.options.length > 0) {
+    parts.push(
+      `SUBJEK PRODUK AMBIGUOUS: frasa "${subjectAmbiguity.phrase}" bisa merujuk ke beberapa kategori: ` +
+        `${subjectAmbiguity.options.join(" / ")} — tanyakan pilihan user, jangan menebak.`,
+    );
+  }
+
   return parts.join("\n\n");
 }
 
@@ -700,6 +942,10 @@ function focusedReply(p: AiProduct, message: string): string {
  * tetap berbasis data nyata dari database, dengan urutan prioritas:
  * 1. fokus satu produk → jawaban spesifik (bukan ringkasan katalog)
  * 1b. hitungan per entitas (jumlah penjual/pembeli/…) → hanya angka yang diminta
+ * 1c. ulasan produk
+ * 1d. subjek ambigu antar kategori → minta klarifikasi
+ * 1e. filter subjek/harga aktif → daftar produk terfilter (tanpa ringkasan katalog);
+ *     hasil kosong → "tidak ada produk memenuhi filter" (bukan "katalog kosong")
  * 2. pertanyaan lanjutan tanpa referensi jelas → minta klarifikasi
  * 3. beberapa kandidat produk ambigu → minta klarifikasi
  * 4. pertanyaan stok habis/menipis → daftar status stok saja
@@ -707,8 +953,9 @@ function focusedReply(p: AiProduct, message: string): string {
  * 6. tidak ada data yang cocok → saran kata kunci
  * 7. daftar produk pencarian umum
  * 
- * Semua jalur produk menerapkan validasi deterministik filter harga (jika ada)
- * sebagai safety net — memastikan tidak ada produk yang bocor keluar filter.
+ * Semua jalur produk menerapkan validasi deterministik filter (subjek/harga/
+ * kategori/toko/rating) sebagai safety net — memastikan tidak ada produk yang
+ * bocor keluar filter.
  */
 export function fallbackResult(opts: {
   message: string;
@@ -720,6 +967,8 @@ export function fallbackResult(opts: {
   ambiguousFollowUp?: boolean;
   generatedAt: string;
   filters?: ProductFilter;
+  /** Frasa subjek ambigu antar kategori → minta klarifikasi (jangan menebak). */
+  subjectAmbiguity?: { phrase: string; options: string[] };
 }): AiChatResult {
   // Parse price filter dari pesan untuk validasi deterministik
   const priceFilter = opts.filters?.price ?? parsePriceFilter(opts.message);
@@ -728,9 +977,17 @@ export function fallbackResult(opts: {
   const applyPriceFilter = (prods: AiProduct[]): AiProduct[] =>
     priceFilter ? filterProductsByPrice(prods, priceFilter) : prods;
 
-  // Safety net untuk filter lain: kategori, toko, rating
+  // Safety net untuk filter lain: subjek, kategori, toko, rating
   const applyFilters = (prods: AiProduct[]): AiProduct[] => {
     let filtered = applyPriceFilter(prods);
+    if (opts.filters?.subject) {
+      const s = opts.filters.subject;
+      const v = s.value.toLowerCase();
+      filtered =
+        s.mode === "category"
+          ? filtered.filter((p) => p.categoryName.toLowerCase().includes(v))
+          : filtered.filter((p) => p.name.toLowerCase().includes(v));
+    }
     if (opts.filters?.category) {
       const cat = opts.filters.category.toLowerCase();
       filtered = filtered.filter((p) => p.categoryName.toLowerCase().includes(cat));
@@ -756,8 +1013,15 @@ export function fallbackResult(opts: {
     if (priceFilter && !productMatchesPriceFilter(opts.focus, priceFilter)) {
       // Fokus tidak memenuhi filter → jangan tampilkan, turun ke klarifikasi
     } else {
-      // Validasi filter lain (kategori, toko, rating)
-      if (opts.filters?.category && !opts.focus.categoryName.toLowerCase().includes(opts.filters.category.toLowerCase())) {
+      const focusSubjectOk =
+        !opts.filters?.subject ||
+        (opts.filters.subject.mode === "category"
+          ? opts.focus.categoryName.toLowerCase().includes(opts.filters.subject.value.toLowerCase())
+          : opts.focus.name.toLowerCase().includes(opts.filters.subject.value.toLowerCase()));
+      // Validasi filter lain (subjek, kategori, toko, rating)
+      if (!focusSubjectOk) {
+        // Fokus tidak memenuhi filter subjek
+      } else if (opts.filters?.category && !opts.focus.categoryName.toLowerCase().includes(opts.filters.category.toLowerCase())) {
         // Fokus tidak memenuhi filter kategori
       } else if (opts.filters?.store && !opts.focus.storeName.toLowerCase().includes(opts.filters.store.toLowerCase())) {
         // Fokus tidak memenuhi filter toko
@@ -796,6 +1060,88 @@ export function fallbackResult(opts: {
       reply: reviewSections.map((s) => `${s.label}:\n${s.text}`).join("\n\n"),
       products: [],
       sources: buildSources(reviewSections, [], opts.generatedAt),
+      generatedAt: opts.generatedAt,
+      source: "fallback",
+    };
+  }
+
+  // 1d. Subjek produk ambigu (frasa bisa berarti >1 kategori) → minta
+  //     klarifikasi SEBELUM menampilkan produk (jangan menebak).
+  if (opts.subjectAmbiguity && opts.subjectAmbiguity.options.length > 0) {
+    const optsList = opts.subjectAmbiguity.options
+      .map((o, i) => `${i + 1}. ${o}`)
+      .join("\n");
+    return {
+      reply:
+        `Istilah "${opts.subjectAmbiguity.phrase}" bisa merujuk ke beberapa kategori produk:\n\n` +
+        `${optsList}\n\n` +
+        `Sebutkan salah satunya (mis. "${opts.subjectAmbiguity.options[0].toLowerCase()} di bawah 50000") ` +
+        "agar saya tampilkan produk yang tepat.",
+      products: [],
+      sources: [],
+      generatedAt: opts.generatedAt,
+      source: "fallback",
+    };
+  }
+
+  // 1e. Filter subjek/harga aktif → daftar produk terfilter SAJA, tanpa
+  //     ringkasan katalog/statistik (sesuai permintaan user berfilter).
+  //     Section non-katalog (pesanan/akun/ulasan/statistik/…) tetap diprioritaskan
+  //     agar konteks pertanyaan lain tidak hilang oleh daftar produk.
+  const f = opts.filters;
+  const hasActiveFilters = !!(
+    f &&
+    (f.price || f.subject || f.category || f.store ||
+      f.inStock !== undefined || f.minRating !== undefined)
+  );
+  const suppressFiltered = opts.sections.some((s) =>
+    ["reviews", "orders", "sales", "stats", "market", "account", "appinfo"].includes(s.key),
+  );
+  if (hasActiveFilters && !suppressFiltered) {
+    const subjText = f?.subject
+      ? ` ${f.subject.phrase}`
+      : f?.category
+        ? ` kategori ${f.category}`
+        : "";
+    const priceText = describePriceFilterText(f?.price);
+    if (allProducts.length > 0) {
+      const shown = allProducts.slice(0, 5);
+      const lines = shown
+        .map(
+          (p, i) =>
+            `${i + 1}. ${p.name} — Rp${p.price.toLocaleString("id-ID")} (stok ${p.stock}, ${statusLabel(p)}, ${p.storeName})`,
+        )
+        .join("\n");
+      const head = priceText
+        ? `Berikut produk${subjText} dengan harga ${priceText}:`
+        : `Berikut produk${subjText || " dari katalog"}:`;
+      const countLine =
+        allProducts.length <= shown.length
+          ? `Menampilkan ${allProducts.length} produk yang cocok.`
+          : `Menampilkan ${shown.length} dari ${allProducts.length} produk yang cocok.`;
+      const link = catalogProductLink(f!);
+      return {
+        reply:
+          `${head}\n\n${lines}\n\n${countLine}` +
+          (link ? `\nBuka ${link} untuk katalog dengan filter yang sama.` : ""),
+        products: shown,
+        sources: buildSources([], shown, opts.generatedAt),
+        generatedAt: opts.generatedAt,
+        source: "fallback",
+      };
+    }
+    // Hasil kosong → sampaikan sebagai "tidak ada yang memenuhi filter",
+    // BUKAN "katalog kosong" (katalog tetap berisi produk lain di luar filter).
+    return {
+      reply:
+        `Tidak ada produk${subjText} yang memenuhi` +
+        (priceText ? ` filter harga ${priceText}` : " kriteria tersebut") +
+        " saat ini." +
+        (!f?.subject && !f?.category
+          ? ' Coba sebutkan jenis produknya (mis. "hasil laut", "umpan", "alat pancing").'
+          : ""),
+      products: [],
+      sources: [],
       generatedAt: opts.generatedAt,
       source: "fallback",
     };
@@ -937,14 +1283,35 @@ export async function generateReply(opts: {
   focusCandidates?: AiProduct[];
   /** Pertanyaan lanjutan tanpa referensi jelas → minta klarifikasi. */
   ambiguousFollowUp?: boolean;
-  /** Filter gabungan (harga, kategori, toko, rating, sorting) — untuk konteks AI. */
+  /** Filter gabungan (harga, subjek, kategori, toko, rating, sorting) — untuk konteks AI. */
   filters?: ProductFilter;
+  /** Frasa subjek ambigu antar kategori → konteks klarifikasi untuk AI & fallback. */
+  subjectAmbiguity?: { phrase: string; options: string[] };
 }): Promise<AiChatResult> {
   const generatedAt = new Date().toISOString();
   const contextProducts = opts.contextProducts ?? [];
   const focus = opts.focus ?? null;
   const focusCandidates = opts.focusCandidates ?? [];
   const fallback = () => fallbackResult({ ...opts, generatedAt });
+
+  // Query BERFILTER (subjek/harga/kategori/toko/stok/rating) → jawaban
+  // DETERMINISTIK lewat komposer fallback: format stabil ("Menampilkan X
+  // produk yang cocok" / "tidak ada memenuhi filter"), daftar = hasil DB
+  // terfilter yang tervalidasi ulang, dan tanpa risiko halusinasi angka
+  // dari model (uji live: kepatuhan model terhadap format ternyata tidak
+  // konsisten). Pertanyaan non-filter tetap memakai jalur AI bila tersedia.
+  const hasActiveFilters = !!(
+    opts.filters &&
+    (opts.filters.price ||
+      opts.filters.subject ||
+      opts.filters.category ||
+      opts.filters.store ||
+      opts.filters.inStock !== undefined ||
+      opts.filters.minRating !== undefined)
+  );
+  if (hasActiveFilters) {
+    return fallback();
+  }
 
   // Union untuk validasi marker [produk:id] & label sumber katalog.
   const allProducts: AiProduct[] = [];
@@ -973,7 +1340,7 @@ export async function generateReply(opts: {
     { role: "system" as const, content: SYSTEM_PROMPT },
     {
       role: "system" as const,
-      content: `DATA DARI DATABASE:\n${contextForPrompt(opts.sections, opts.products, contextProducts, focus, focusCandidates, opts.filters)}`,
+      content: `DATA DARI DATABASE:\n${contextForPrompt(opts.sections, opts.products, contextProducts, focus, focusCandidates, opts.filters, opts.subjectAmbiguity)}`,
     },
     ...opts.history.slice(-8),
     { role: "user" as const, content: opts.message },
