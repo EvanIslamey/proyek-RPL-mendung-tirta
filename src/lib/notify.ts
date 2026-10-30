@@ -14,7 +14,9 @@
  *    otomatis via timer dalam proses, atau cron luar — lihat README).
  * 5. Email non-esensial (STOCK_LOW) menghormati preferensi `User.emailAlerts`;
  *    email transaksional (pesanan/pembayaran) selalu terkirim.
- * 6. Telegram menghormati `User.telegramNotify` dan `User.telegramChatId`.
+ * 6. Telegram menghormati `User.telegramNotify` dan `User.telegramChatId`,
+ *    dan hanya dikirim pada percobaan pertama — retry email TIDAK mengirim
+ *    ulang notifikasi Telegram yang sama (anti pengiriman ganda).
  * 7. Kegagalan final memicu notifikasi in-app ke admin (email SKIPPED —
  *    loop-guard, tanpa mengirim email lagi).
  */
@@ -56,6 +58,16 @@ export function sanitizeEmailError(e: unknown): string {
 /** Kebijakan preferensi: transaksional (essential) tidak bisa dimatikan. */
 export function emailAllowed(essential: boolean | undefined, emailAlerts: boolean): boolean {
   return (essential ?? true) || emailAlerts;
+}
+
+/**
+ * Telegram hanya dikirim pada percobaan PERTAMA sebuah notifikasi.
+ * Retry email (baris FAILED → diklaim ulang) tidak boleh mengirim ulang
+ * notifikasi Telegram yang sama — anti pengiriman ganda akibat retry.
+ * `attemptsBefore` = jumlah percobaan SEBELUM percobaan berjalan (dari klaim).
+ */
+export function telegramSendOnce(attemptsBefore: number): boolean {
+  return attemptsBefore === 0;
 }
 
 function isUniqueViolation(e: unknown): boolean {
@@ -244,11 +256,16 @@ export async function dispatchEmails(ids: string[]): Promise<void> {
     for (const id of unique) {
       const row = await claim(id);
       if (!row) continue;
+      // Percobaan pertama (klaim: emailAttempts=0) → kirim Telegram sekali saja;
+      // retry email berikutnya TIDAK mengirim ulang Telegram (anti duplikat).
+      const firstAttempt = telegramSendOnce(row.emailAttempts);
       await sendOne(row);
       // Kirim Telegram secara terpisah (gagal tidak block email)
-      await sendTelegramNotification(row.user.id, row.title, row.body, row.link ?? undefined).catch((e) => {
-        console.error(`[telegram] GAGAL id=${row.id}:`, sanitizeEmailError(e));
-      });
+      if (firstAttempt) {
+        await sendTelegramNotification(row.user.id, row.title, row.body, row.link ?? undefined).catch((e) => {
+          console.error(`[telegram] GAGAL id=${row.id}:`, sanitizeEmailError(e));
+        });
+      }
     }
   } catch (e) {
     console.error("[notify] dispatch error:", sanitizeEmailError(e));

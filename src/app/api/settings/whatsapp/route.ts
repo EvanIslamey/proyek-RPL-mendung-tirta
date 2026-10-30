@@ -76,6 +76,13 @@ export async function PUT(request: NextRequest) {
     const needsPhoneId = WHATSAPP_PROVIDERS[provider as WhatsAppProviderId].needsPhoneId;
     if (needsPhoneId && !meta?.phoneId) {
       errors.phoneId = "Phone Number ID wajib diisi untuk provider ini.";
+    } else if (needsPhoneId && meta?.phoneId) {
+      // Phone Number ID Meta adalah ANGKA ID dari Developer Dashboard —
+      // tolak email / nomor WhatsApp (kesalahan input yang umum).
+      if (!/^\d{5,25}$/.test(meta.phoneId)) {
+        errors.phoneId =
+          "Phone Number ID harus berupa angka ID dari Meta Developer Dashboard (WhatsApp → API Setup), bukan email atau nomor WhatsApp.";
+      }
     }
 
     if (Object.keys(errors).length > 0) {

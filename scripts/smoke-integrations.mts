@@ -111,6 +111,79 @@ async function main() {
     const waText = putWa.text;
     check("Response simpan WA TIDAK memuat token mentah", !waText.includes(TOKEN));
     check("Response simpan WA menampilkan hint tersamarkan", /sk-smoke.{0,12}1234|•{3,}/.test(waText), waText.slice(0, 200));
+
+    // Uji koneksi WA dengan token uji -> hasil AKTUAL dari provider
+    // (token palsu ditolak Meta — tidak pernah mengarang sukses).
+    const waTest = await api("/api/settings/whatsapp/test", { method: "POST", cookie });
+    const waRes = waTest.json?.result as { ok?: boolean; note?: string } | undefined;
+    check(
+      "Uji koneksi WA (token uji) -> hasil aktual provider, bukan sukses palsu",
+      waTest.status === 200 && typeof waRes?.note === "string" && waRes.note.length > 0 && waRes.ok === false,
+      `status=${waTest.status} ok=${waRes?.ok} note=${waRes?.note}`,
+    );
+    check("Hasil uji WA TIDAK memuat token mentah", !waTest.text.includes(TOKEN));
+
+    // Kirim pesan uji: konfigurasi belum aktif -> DITOLAK, tidak ada pesan terkirim.
+    const waMsg = await api("/api/settings/whatsapp/test", {
+      method: "PUT",
+      cookie,
+      body: { to: "+6281234567890" },
+    });
+    const msgRes = waMsg.json?.result as { ok?: boolean; note?: string } | undefined;
+    check(
+      "Kirim pesan uji saat konfigurasi nonaktif -> ditolak (tidak mengirim)",
+      waMsg.status === 200 && msgRes?.ok === false,
+      `status=${waMsg.status} ok=${msgRes?.ok} note=${msgRes?.note}`,
+    );
+
+    // Nomor tujuan tidak valid -> ditolak sebelum menyentuh provider.
+    const waBadTo = await api("/api/settings/whatsapp/test", {
+      method: "PUT",
+      cookie,
+      body: { to: "081234567890" },
+    });
+    check(
+      "Nomor tujuan non-E.164 -> ditolak backend",
+      waBadTo.status >= 400,
+      `status ${waBadTo.status}`,
+    );
+  }
+
+  // --- 2b. ADMIN: validasi Phone Number ID & uji koneksi WhatsApp jujur ---
+  {
+    const cookie = await login("admin@mendungtirta.com", "password123");
+    if (!cookie) throw new Error("Gagal login admin.");
+
+    // Phone Number ID harus angka ID dari Meta — email/nomor ditolak backend.
+    const badEmail = await api("/api/settings/whatsapp", {
+      method: "PUT",
+      cookie,
+      body: { provider: "meta-whatsapp-cloud", meta: { phoneId: "admin@mendungtirta.com" } },
+    });
+    check(
+      "ADMIN simpan WA dengan phoneId=email -> ditolak backend",
+      badEmail.status === 400,
+      `status ${badEmail.status}`,
+    );
+    const badPhone = await api("/api/settings/whatsapp", {
+      method: "PUT",
+      cookie,
+      body: { provider: "meta-whatsapp-cloud", meta: { phoneId: "+6281234567890" } },
+    });
+    check(
+      "ADMIN simpan WA dengan phoneId=nomor tujuan -> ditolak backend",
+      badPhone.status === 400,
+      `status ${badPhone.status}`,
+    );
+
+    // Uji koneksi TANPA konfigurasi -> hasil jujur "belum disimpan" (bukan sukses palsu).
+    const noCfg = await api("/api/settings/whatsapp/test", { method: "POST", cookie });
+    const noRes = noCfg.json?.result as { ok?: boolean; note?: string } | undefined;
+    check(
+      "Uji koneksi WA tanpa konfigurasi -> ditolak jujur (bukan sukses)",
+      noCfg.status === 200 && noRes?.ok === false,
+      `status=${noCfg.status} note=${noRes?.note}`,
+    );
   }
 
   // --- 3. ADMIN: kelola API Key global — persisten, tersamarkan, tidak bocor ---

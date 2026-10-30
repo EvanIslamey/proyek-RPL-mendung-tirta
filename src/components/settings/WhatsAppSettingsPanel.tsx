@@ -362,6 +362,36 @@ export function WhatsAppSettingsPanel() {
         </div>
       )}
 
+      <div
+        style={{
+          fontSize: "0.75rem",
+          color: "var(--text-muted)",
+          marginTop: "0.75rem",
+          lineHeight: 1.5,
+        }}
+      >
+        <strong>Petunjuk Meta (WhatsApp Cloud API):</strong>
+        <ul style={{ margin: "0.3rem 0 0", paddingLeft: "1.1rem" }}>
+          <li>
+            <strong>Phone Number ID</strong> diambil dari Meta Developer Dashboard → App → WhatsApp →
+            API Setup (berupa angka ID), bukan email admin atau nomor WhatsApp tujuan.
+          </li>
+          <li>
+            <strong>Access token</strong> juga dari halaman yang sama (token uji sementara atau token
+            permanen). Token disimpan terenkripsi di server dan tidak pernah ditampilkan kembali.
+          </li>
+          <li>
+            Pesan uji memakai format teks biasa. Di luar jendela 24 jam sejak pelanggan menghubungi
+            Anda, Meta hanya mengizinkan pesan yang memakai <strong>template disetujui</strong> —
+            bila pengiriman ditolak provider, buat template di Meta Manager atau mulai percakapan
+            dari nomor tujuan lebih dulu.
+          </li>
+          <li>
+            Nomor tujuan harus bersedia menerima pesan (opt-in) dari nomor WhatsApp Business Anda.
+          </li>
+        </ul>
+      </div>
+
       <p
         style={{
           fontSize: "0.75rem",

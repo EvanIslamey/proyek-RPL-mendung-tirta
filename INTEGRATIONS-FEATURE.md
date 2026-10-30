@@ -52,6 +52,15 @@ dipakai di semua route `/api/settings/*`. Smoke test membuktikan setiap sel matr
 | WHATSAPP (kirim uji) | sama | `POST {endpoint}/{id}/messages` — **hanya saat tombol ditekan**, nomor divalidasi E.164 (`+628…`) |
 | AI_PROVIDER | `openai-compatible` (OpenAI, NVIDIA NIM, endpoint OpenAI-compatible lain) | `GET {base}/models` dengan Bearer key |
 
+**Validasi Phone Number ID (baru):** backend kini menolak Phone Number ID yang bukan
+angka (`/^\d{5,25}$/`) — email admin atau nomor WhatsApp tujuan ditolak dengan pesan
+jelas, sesuai ketentuan Meta (ID berupa angka dari App → WhatsApp → API Setup).
+
+**Petunjuk template Meta (baru, tampil di UI):** panel Pengaturan WhatsApp menampilkan
+instruksi: lokasi Phone Number ID & access token di dasbor Meta, kewajiban **template
+disetujui** untuk pesan di luar jendela24 jam, kebutuhan opt-in penerima, serta catatan
+webhook/localhost (butuh tunnel untuk menerima webhook masuk).
+
 Adapter dirancang provider-agnostic (registry `WHATSAPP_PROVIDERS`/`AI_PROVIDERS` di
 `integrations.ts`) — menambah provider lain cukup menambah entri registry + logika uji.
 
@@ -90,11 +99,18 @@ Semua: wajib login + `assertSameOrigin` (mutasi) + rate limit + sanitasi error t
 - Jawaban tetap jujur: filter harga/subjek sengaja memakai jalur deterministik
   (`source=fallback`, desain fitur sebelumnya), jawaban kosong/gagal provider → fallback
   berbasis data — tidak ada jawaban AI palsu.
-- **WhatsApp tidak dihubungkan ke pipeline notifikasi** (notifikasi tetap email + Telegram).
-  Alasannya jujur: schema tidak punya nomor telepon user, dan menggandakan kiriman akan
-  membuat notifikasi duplikat. Yang disediakan: konfigurasi + pengujian nyata siap pakai
-  ketika nomor tujuan tersedia.
-- **Anti pengiriman ganda:** pesan uji WhatsApp hanya terkirim saat tombol ditekan secara eksplisit.
+- **WhatsApp tidak dihubungkan ke pipeline notifikasi** (notifikasi tetap in-app + email +
+  Telegram). Alasannya jujur: (a) schema tidak punya nomor telepon user — penerima tidak
+  bisa ditentukan; (b) credential Meta belum diisi; (c) mengirim ke satu nomor uji akan
+  membuat notifikasi ganda/salah sasaran. Yang disediakan: kanal siap uji (konfigurasi +
+  pengujian nyata) dan keputusan penerima perlu ditentukan lebih dulu.
+- **Anti pengiriman ganda:** pesan uji WhatsApp hanya terkirim saat tombol ditekan secara
+  eksplisit, hanya bila konfigurasi aktif, nomor divalidasi E.164, dan rate-limited (5/menit).
+- **Perbaikan anti-duplikasi notifikasi (baru):** `dispatchEmails` kini mengirim **Telegram
+  hanya pada percobaan pertama** (`telegramSendOnce()` di `src/lib/notify.ts`) — retry
+  email (baris FAILED → diklaim ulang) tidak lagi mengirim ulang notifikasi Telegram yang
+  sama. Baris notifikasi tetap diklaim atomik (hanya satu pengirim), retry terbatas3×
+  dengan backoff, dan kegagalan tidak pernah membatalkan pesanan.
 
 ## 8. Alur lokal (localhost)
 
@@ -109,22 +125,29 @@ Semua: wajib login + `assertSameOrigin` (mutasi) + rate limit + sanitasi error t
 
 | Lapisan | Hasil |
 |---|---|
-| Unit test (vitest) | **198/198 lulus** — 26 test integrations (validasi, matriks role, resolveAiRuntime, guard aktivasi, verifikasi material, sanitasi) + 10 test secret-store (roundtrip, tamper, tanpa plaintext, masking) + 162 test lama utuh |
-| Smoke test live (`scripts/smoke-integrations.mts`) | **31/31 PASS** — 401 tanpa login, 403 BUYER/SELLER, persistensi setelah reload, hint tersamarkan, key mentah tidak pernah ada di respons/DB, key lama dipertahankan saat disimpan ulang, uji aktual, aktivasi tanpa validasi ditolak, chatbot tetap jawab (fallback), DB berisi ciphertext `v1:`, profil/password utuh |
+| Unit test (vitest) | **205/205 lulus** — termasuk7 test baru `notify.test.ts` (Telegram hanya sekali saat retry, kebijakan preferensi, backoff, sanitasi error) |
+| Smoke test live (`scripts/smoke-integrations.mts`) | **38/38 PASS** — semua cek lama utuh +7 cek baru WhatsApp: phoneId email/nomor ditolak, uji koneksi WA memberi hasil aktual provider (token uji ditolak Meta, bukan sukses palsu), kirim pesan uji saat konfigurasi nonaktif ditolak (tidak mengirim), nomor non-E.164 ditolak, uji tanpa konfigurasi jujur "belum disimpan" |
 | Verifikasi E2E chatbot (`scripts/verify-db-ai-config.mts`) | **9/9 PASS** — konfigurasi DB aktif benar-benar dipakai: jawaban datang dari mock provider, header `Authorization` memakai credential terdekripsi dari DB, nonaktifkan → kembali ke env, data uji dibersihkan |
-| UI live (browser) | panel tampil di halaman profil ADMIN & SELLER; halaman BUYER bersih; navbar tanpa menu baru; simpan + reload persisten; hint `Tersimpan: sk-••••••••ghij`; kunci mentah tidak ada di DOM; uji koneksi menampilkan hasil aktual |
-| `npm run typecheck` / `lint` / `build` | **bersih** — 0 error (2 warning lama di file yang tidak disentuh); build sukses dengan 5 route `/api/settings/*` terdaftar |
+| Verifikasi NVIDIA (`scripts/verify-nvidia.mts`) | **LOLOS** — `GET /models`200 (85 model, model terkonfigurasi ada di daftar) + `POST /chat/completions`200 dengan balasan nyata (bukti key diterima; key tidak pernah dicetak) |
+| Uji chatbot live (`scripts/test-chatbot-live.mts`) | **2/2 BERHASIL** — `source=ai` dengan konfigurasi aktif di DB (`resolveAiRuntime` → `source=db`); latensi3,3 dtk &22,6 dtk; uji grounding: pertanyaan "Siapa saya…" dijawab **data akun asli dari DB** (nama + tanggal daftar persis), tanpa mengarang |
+| Setup config via API (`scripts/setup-ai-config.mts`) | **LOLOS** — simpan (hint `nva••••••••bUdd`, key mentah tidak ada di respons) → uji (`ok=true`,85 model) → aktifkan (guard lolos uji) → baca ulang persisten |
+| UI live (browser) | panel tampil di halaman profil ADMIN & SELLER; halaman BUYER bersih; **navbar tanpa menu baru**; status koneksi menampilkan **"API Key AI … Aktif … Berhasil — Koneksi ke provider AI berhasil (85 model terdaftar)"**; badge panel "Aktif & teruji"; model `meta/llama-3.2-11b-vision-instruct` & Base URL NVIDIA tampil di form; Petunjuk Meta tampil; key mentah tidak ada di DOM |
+| `npm run typecheck` / `lint` / `build` | **bersih** — typecheck0 error; lint0 error (2 warning lama di file yang tidak disentuh); build sukses dengan5 route `/api/settings/*` terdaftar |
 
-## 10. Yang membutuhkan kredensial eksternal
+## 10. Yang membutuhkan kredensial / keputusan manual
 
-Fitur ini berfungsi penuh secara teknis; yang tidak bisa disimulasikan di lingkungan lokal:
-
-1. **Pesan WhatsApp sungguhan terkirim** — butuh access token + Phone Number ID Meta yang
-   valid (Meta Business Suite). Tanpa itu, "Uji Koneksi"/"Kirim Pesan Uji" akan jujur
-   menampilkan kegagalan provider.
-2. **Jawaban AI sungguhan dari konfigurasi DB** — butuh API key provider valid
-   (via UI) atau env `AI_API_KEY`. Tanpa keduanya chatbot tetap berjalan mode fallback.
-3. **Webhook WhatsApp masuk** — butuh endpoint publik/tunnel (lihat bagian 8).
+1. **Pesan WhatsApp sungguhan terkirim** — form Pengaturan WhatsApp masih menunggu isi Anda:
+   - **Phone Number ID** — angka ID dari Meta Developer Dashboard → App → WhatsApp → API Setup
+     (bukan email, bukan nomor tujuan; backend menolak format selain angka).
+   - **Access token** — dari halaman Meta yang sama (token uji sementara atau permanen).
+   - **Nomor WhatsApp tujuan (E.164)** — untuk tombol *Kirim Pesan Uji*.
+   - Isi → **Simpan Konfigurasi** → **Uji Koneksi** → (setelah lolos) **Aktifkan** →
+     **Kirim Pesan Uji**. Tanpa ini semua uji akan jujur menampilkan kegagalan provider.
+2. **Notifikasi pesanan/pembayaran via WhatsApp** — butuh keputusan penerima: schema tidak
+   punya nomor telepon user (perlu tambah field + pengisian di profil), ATAU kirim salinan
+   notifikasi ke nomor admin (perlu persetujuan agar tidak dianggap notifikasi ganda).
+3. **Webhook WhatsApp masuk** — butuh endpoint publik/tunnel (lihat bagian8). localhost tidak
+   diekspos tanpa persetujuan.
 
 ## 11. Daftar file
 
@@ -137,8 +160,47 @@ Fitur ini berfungsi penuh secara teknis; yang tidak bisa disimulasikan di lingku
 - `src/components/settings/WhatsAppSettingsPanel.tsx`, `ApiKeySettingsPanel.tsx`,
   `IntegrationStatusPanel.tsx`, `settings.css`
 - `scripts/smoke-integrations.mts`, `scripts/verify-db-ai-config.mts`
+- `scripts/verify-nvidia.mts` (cek ketersediaan model + bukti key diterima provider)
+- `scripts/setup-ai-config.mts` (simpan/uji/aktifkan konfigurasi NVIDIA via API asli)
+- `scripts/test-chatbot-live.mts` (uji chatbot live `source=ai` + bukti resolver DB)
+- `scripts/bench-models.mts` (benchmark model terdaftar di akun — dasar pemilihan model)
+- `scripts/inspect-config.mts` (inspeksi metadata config tersimpan, tanpa rahasia)
+- `src/lib/notify.test.ts` (7 test anti-duplikasi notifikasi)
 
 **Dimodifikasi:**
 - `src/lib/ai.ts` (baca runtime AI via `resolveAiRuntime`, fallback tak berubah)
 - `src/app/seller/profile/page.tsx`, `src/app/admin/profile/page.tsx` (sisip 2–3 panel)
+- `src/lib/notify.ts` (Telegram hanya dikirim pada percobaan pertama — anti duplikat retry)
+- `src/app/api/settings/whatsapp/route.ts` (Phone Number ID wajib angka Meta, tolak email/nomor)
+- `src/components/settings/WhatsAppSettingsPanel.tsx` (Petunjuk Meta: lokasi ID/token,
+  template 24 jam, opt-in, catatan webhook)
+- `scripts/smoke-integrations.mts` (+7 cek WhatsApp)
 - `vitest.config.ts` (env kunci enkripsi khusus unit test), `.env.example`, `.gitignore`
+
+## 12. Koneksi NVIDIA NIM (laporan A)
+
+- **API key DITEMUKAN di konfigurasi lokal** (`AI_API_KEY` di `.env`, ter-gitignore,
+  panjang 70 karakter) — nilai tidak pernah dicetak/dilaporkan; key lama tidak ditimpa.
+- **Endpoint:** `https://integrate.api.nvidia.com/v1` (base URL resmi NIM, sama dengan
+  default `AI_PROVIDERS["openai-compatible"]`).
+- **Konfigurasi aktif di DB** (disimpan via API asli, terenkripsi AES-256-GCM,
+  hint `nva••••••••bUdd`): provider `openai-compatible` → uji koneksi `ok=true`
+  (**85 model terdaftar**) → diaktifkan → chatbot memakainya
+  (`resolveAiRuntime` → `source=db`; fallback env tetap utuh, tidak diubah).
+- **Pemilihan model — diverifikasi, bukan ditebak.** `GET /models` di akun memuat 85 ID,
+  tetapi uji `chat/completions` menunjukkan hanya 4 yang benar-benar dapat dilayani
+  (12 kandidat lain **HTTP 404** meski terdaftar — "terdaftar ≠ tersedia"):
+
+  | Kandidat | Hasil uji nyata |
+  |---|---|
+  | `openai/gpt-oss-20b` (konfigurasi lama) | ✅ jalan tapi **53–85 detik**; dengan timeout lama 45 dtk chatbot selalu terdorong ke fallback |
+  | **`meta/llama-3.2-11b-vision-instruct`** | ✅ **dipilih** — tercepat & konsisten; via chatbot live: **3,3–22,6 detik**, `source=ai`, jawaban Indonesia berkualitas |
+  | `minimaxai/minimax-m3.1-flash` | ✅ alternatif (31–34 dtk, output reasoning) |
+  | `nvidia/nemotron-3.5-lightning-30b-a3b` | ⚠️ `finish=length` — jawaban terpotong |
+  | `z-ai/glm-5.3-flash`, `deepseek-ai/deepseek-v4.1-flash`, `google/gemma-4-31b-it`, dll. | ❌ timeout 75 dtk / HTTP 404 |
+
+- **`AI_TIMEOUT_MS` dinaikkan 45000 → 90000** di `.env` (rentang aman ≤ 120000) sebagai
+  pengaman bila provider lambat — tanpa ini permintaan AI gagal diam-diam ke fallback.
+- **Hasil uji:** uji koneksi backend `ok=true`; 2/2 permintaan chatbot live menghasilkan
+  `source=ai` dengan jawaban provider nyata, termasuk bukti grounding: pertanyaan akun
+  dijawab **data asli dari database** (nama + tanggal daftar persis) tanpa mengarang.
