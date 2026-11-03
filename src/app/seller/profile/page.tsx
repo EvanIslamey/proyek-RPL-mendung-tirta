@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/Toast";
 import { formatDateId } from "@/lib/format";
 import { WhatsAppSettingsPanel } from "@/components/settings/WhatsAppSettingsPanel";
+import { WhatsAppPreferencesPanel } from "@/components/settings/WhatsAppPreferencesPanel";
 import { IntegrationStatusPanel } from "@/components/settings/IntegrationStatusPanel";
 
 type Profile = {
@@ -330,6 +331,7 @@ export default function SellerProfilePage() {
           marginTop: "1.5rem",
         }}
       >
+        <WhatsAppPreferencesPanel />
         <WhatsAppSettingsPanel />
         <IntegrationStatusPanel />
       </div>

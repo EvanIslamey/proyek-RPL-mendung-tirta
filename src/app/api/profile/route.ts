@@ -1,10 +1,12 @@
 import type { NextRequest } from "next/server";
 import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { isValidIndonesiaMobile } from "@/lib/integrations";
 import { ApiError, assertSameOrigin, asTrimmedString, parseJsonBody } from "@/lib/validate";
 
 /**
  * GET /api/profile — profil user yang login (wajib login).
+ * Menyertakan nomor WhatsApp & persetujuan notifikasi WhatsApp milik sendiri.
  */
 export async function GET() {
   try {
@@ -17,6 +19,8 @@ export async function GET() {
         email: true,
         role: true,
         address: true,
+        phone: true,
+        whatsappNotify: true,
         isActive: true,
         createdAt: true,
         _count: { select: { orders: true } },
@@ -31,6 +35,8 @@ export async function GET() {
         email: dbUser.email,
         role: dbUser.role,
         address: dbUser.address,
+        phone: dbUser.phone,
+        whatsappNotify: dbUser.whatsappNotify,
         orderCount: dbUser._count.orders,
         createdAt: dbUser.createdAt.toISOString(),
       },
@@ -45,8 +51,13 @@ export async function GET() {
 }
 
 /**
- * PATCH /api/profile — ubah nama/alamat milik sendiri.
+ * PATCH /api/profile — ubah nama/alamat/nomor WhatsApp/persetujuan notifikasi.
  * Email, role, dan password TIDAK bisa diubah lewat endpoint ini.
+ *
+ * Invarian notifikasi WhatsApp (divalidasi server, bukan hanya UI):
+ * - nomor harus format internasional Indonesia (+628…);
+ * - persetujuan (whatsappNotify=true) hanya boleh bila nomor tersedia;
+ * - membatalkan nomor otomatis menonaktifkan persetujuan.
  */
 export async function PATCH(request: NextRequest) {
   try {
@@ -55,7 +66,12 @@ export async function PATCH(request: NextRequest) {
     const body = await parseJsonBody(request);
 
     const errors: Record<string, string> = {};
-    const data: { name?: string; address?: string | null } = {};
+    const data: {
+      name?: string;
+      address?: string | null;
+      phone?: string | null;
+      whatsappNotify?: boolean;
+    } = {};
 
     if (body.name !== undefined) {
       const name = asTrimmedString(body.name);
@@ -72,6 +88,37 @@ export async function PATCH(request: NextRequest) {
         errors.address = "Alamat maksimal 255 karakter.";
       } else {
         data.address = address;
+      }
+    }
+    if (body.phone !== undefined) {
+      const raw = body.phone;
+      const phone = raw === null || raw === "" ? null : asTrimmedString(raw);
+      if (phone !== null && !isValidIndonesiaMobile(phone)) {
+        errors.phone = "Gunakan format nomor internasional Indonesia, mis. +6281234567890.";
+      } else {
+        data.phone = phone;
+        if (phone === null && body.whatsappNotify === undefined) {
+          // Nomor dihapus → persetujuan tidak mungkin tetap berlaku.
+          data.whatsappNotify = false;
+        }
+      }
+    }
+    if (body.whatsappNotify !== undefined) {
+      if (typeof body.whatsappNotify !== "boolean") {
+        errors.whatsappNotify = "Nilai harus boolean.";
+      } else {
+        data.whatsappNotify = body.whatsappNotify;
+      }
+    }
+
+    // Persetujuan aktif mensyaratkan nomor tersedia (baru atau lama).
+    if (data.whatsappNotify === true && !data.phone) {
+      const cur = await prisma.user.findUnique({
+        where: { id: user.id },
+        select: { phone: true },
+      });
+      if (!cur?.phone) {
+        errors.whatsappNotify = "Isi nomor WhatsApp dulu sebelum mengaktifkan notifikasi.";
       }
     }
 

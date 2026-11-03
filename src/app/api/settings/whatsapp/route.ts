@@ -3,12 +3,13 @@ import { ApiError, assertSameOrigin, asTrimmedString, parseJsonBody } from "@/li
 import {
   getIntegrationConfig,
   isValidHttpUrl,
+  isValidIndonesiaMobile,
+  isValidWhatsAppNumber,
   requireIntegrationUser,
   sanitizeMeta,
   saveIntegrationConfig,
   toSafeConfig,
   WHATSAPP_PROVIDERS,
-  type WhatsAppProviderId,
 } from "@/lib/integrations";
 
 /**
@@ -34,8 +35,10 @@ export async function GET() {
 }
 
 /**
- * PUT /api/settings/whatsapp — simpan konfigurasi WhatsApp.
+ * PUT /api/settings/whatsapp — simpan konfigurasi WhatsApp (Fonnte).
  * Credential disimpan terenkripsi; nilai lama dipertahankan bila field kosong.
+ * Field Meta lama (Phone Number ID) tidak lagi diterima; status perangkat
+ * hanya boleh berasal dari uji koneksi (dibersihkan dari input client).
  */
 export async function PUT(request: NextRequest) {
   try {
@@ -43,7 +46,7 @@ export async function PUT(request: NextRequest) {
     const { user, scope } = await requireIntegrationUser("WHATSAPP");
     const body = await parseJsonBody(request);
 
-    const provider = asTrimmedString(body.provider) || "meta-whatsapp-cloud";
+    const provider = asTrimmedString(body.provider) || "fonnte";
     if (!(provider in WHATSAPP_PROVIDERS)) {
       throw new ApiError(400, "Data tidak valid.", { provider: "Provider tidak dikenali." });
     }
@@ -60,28 +63,62 @@ export async function PUT(request: NextRequest) {
       }
     }
 
-    // Credential: hanya diproses bila diisi (kosong = pertahankan lama).
+    // Credential (API token Fonnte): hanya diproses bila diisi (kosong = lama).
     const credentialRaw = body.credential === undefined ? "" : asTrimmedString(body.credential);
     let credential: string | null = null;
     if (credentialRaw) {
       if (credentialRaw.length < 5 || credentialRaw.length > 2000) {
-        errors.credential = "Access token tidak valid (5–2000 karakter).";
+        errors.credential = "API token tidak valid (5–2000 karakter).";
       } else {
         credential = credentialRaw;
       }
     }
 
-    // Metadata non-rahasia (phoneId, dst.).
-    const meta = sanitizeMeta(body.meta);
-    const needsPhoneId = WHATSAPP_PROVIDERS[provider as WhatsAppProviderId].needsPhoneId;
-    if (needsPhoneId && !meta?.phoneId) {
-      errors.phoneId = "Phone Number ID wajib diisi untuk provider ini.";
-    } else if (needsPhoneId && meta?.phoneId) {
-      // Phone Number ID Meta adalah ANGKA ID dari Developer Dashboard —
-      // tolak email / nomor WhatsApp (kesalahan input yang umum).
-      if (!/^\d{5,25}$/.test(meta.phoneId)) {
-        errors.phoneId =
-          "Phone Number ID harus berupa angka ID dari Meta Developer Dashboard (WhatsApp → API Setup), bukan email atau nomor WhatsApp.";
+    // Metadata non-rahasia: nomor tujuan uji, nomor pengirim, penerima notifikasi.
+    const meta = sanitizeMeta(body.meta) ?? {};
+    // Kunci yang TIDAK boleh ditentukan client:
+    // - phoneId: sisa integrasi Meta (sudah tidak digunakan);
+    // - device*: status perangkat hanya dari hasil Uji Koneksi provider.
+    for (const k of [
+      "phoneId",
+      "deviceNumber",
+      "deviceStatus",
+      "deviceName",
+      "deviceQuota",
+      "devicePackage",
+      "deviceExpired",
+    ]) {
+      delete meta[k];
+    }
+
+    // Nomor tujuan pengujian (opsional): wajib E.164 bila diisi.
+    if (meta.testTarget && !isValidWhatsAppNumber(meta.testTarget)) {
+      errors.testTarget =
+        "Nomor tujuan pengujian tidak valid (format internasional, mis. +6281234567890).";
+    }
+
+    // Nomor WhatsApp pengirim/perangkat (opsional, informasional): format +62.
+    if (meta.senderNumber && !isValidIndonesiaMobile(meta.senderNumber)) {
+      errors.senderNumber =
+        "Nomor pengirim harus format internasional Indonesia (+62812…), bukan 08xx.";
+    }
+
+    // Penerima notifikasi operasional (HANYA konfigurasi global/admin).
+    if (meta.opsTargets) {
+      if (scope !== "") {
+        delete meta.opsTargets; // seller tidak boleh mengatur penerima operasional global
+      } else {
+        const list = meta.opsTargets
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const invalid = list.filter((s) => !isValidWhatsAppNumber(s));
+        if (invalid.length > 0 || list.length === 0) {
+          errors.opsTargets =
+            "Daftar nomor penerima harus nomor internasional (+628…) dipisah koma.";
+        } else {
+          meta.opsTargets = list.join(",");
+        }
       }
     }
 
@@ -95,7 +132,7 @@ export async function PUT(request: NextRequest) {
       provider,
       endpoint,
       credential,
-      meta,
+      meta: Object.keys(meta).length > 0 ? meta : null,
     });
 
     console.info(

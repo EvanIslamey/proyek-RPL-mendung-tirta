@@ -184,6 +184,24 @@ export async function registerUser(input: {
         });
         if (id) notifyIds.push(id);
       }
+    } else {
+      // Admin: pengguna baru (BUYER) mendaftar.
+      const admins = await prisma.user.findMany({
+        where: { role: "ADMIN", isActive: true },
+        select: { id: true },
+        orderBy: { createdAt: "asc" },
+      });
+      for (const a of admins) {
+        const id = await notifyStandalone({
+          userId: a.id,
+          kind: "ACCOUNT_ALERT",
+          title: `Pengguna baru mendaftar: ${input.name}`,
+          body: `Akun pembeli "${input.name}" (${input.email}) baru saja mendaftar.`,
+          link: "/admin/users",
+          dedupeKey: `account:buyer-registered:${user.id}`,
+        });
+        if (id) notifyIds.push(id);
+      }
     }
 
     void dispatchEmails(notifyIds);

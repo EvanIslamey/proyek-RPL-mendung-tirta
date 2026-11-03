@@ -10,8 +10,10 @@
  *   dengan fallback ke environment variable bila tidak ada/konfigurasi rusak.
  *
  * Provider yang didukung saat ini:
- * - WHATSAPP: "meta-whatsapp-cloud" (Meta WhatsApp Cloud API). Endpoint
- *   default https://graph.facebook.com/v21.0 — dikembangkan bila provider lain dibutuhkan.
+ * - WHATSAPP: "fonnte" (Fonnte WhatsApp Gateway). Endpoint default
+ *   https://api.fonnte.com — uji koneksi via POST /device, kirim via POST /send
+ *   dengan header Authorization token mentah (tanpa Bearer). Provider lama
+ *   (Meta Cloud API) TIDAK lagi digunakan untuk pengiriman.
  * - AI_PROVIDER: OpenAI-compatible / NVIDIA NIM (GET {base}/models untuk uji).
  *
  * Kredensial TIDAK PERNAH dikirim ke frontend, dicatat ke log, atau
@@ -23,6 +25,7 @@ import type { IntegrationService } from "../../prisma/generated/client";
 import { decryptSecret, encryptSecret, maskSecret } from "./secret-store";
 import { requireUser } from "./auth";
 import type { SafeUser } from "./auth";
+import { fonnteDeviceProfile, fonnteSendText, type FonnteDevice } from "./fonnte";
 
 // ---------------------------------------------------------------------------
 // Tipe
@@ -30,17 +33,16 @@ import type { SafeUser } from "./auth";
 
 export type IntegrationScope = "" | string; // "" = global (ADMIN); lain = userId (SELLER)
 
-export type WhatsAppProviderId = "meta-whatsapp-cloud";
+export type WhatsAppProviderId = "fonnte";
 export type AiProviderId = "openai-compatible";
 
 export const WHATSAPP_PROVIDERS: Record<
   WhatsAppProviderId,
-  { label: string; defaultEndpoint: string; needsPhoneId: boolean }
+  { label: string; defaultEndpoint: string }
 > = {
-  "meta-whatsapp-cloud": {
-    label: "Meta WhatsApp Cloud API",
-    defaultEndpoint: "https://graph.facebook.com/v21.0",
-    needsPhoneId: true,
+  fonnte: {
+    label: "Fonnte WhatsApp Gateway",
+    defaultEndpoint: "https://api.fonnte.com",
   },
 };
 
@@ -72,6 +74,14 @@ export type SafeIntegrationConfig = {
 
 export type IntegrationTestResult = { ok: boolean; note: string };
 
+/**
+ * Hasil uji koneksi WhatsApp (Fonnte) — menyertakan snapshot status perangkat
+ * (nomor/kondisi/kuota) bila provider berhasil menjawab; NON-rahasia.
+ */
+export type WhatsAppTestResult = IntegrationTestResult & {
+  device?: FonnteDevice | null;
+};
+
 // ---------------------------------------------------------------------------
 // Validasi
 // ---------------------------------------------------------------------------
@@ -90,6 +100,14 @@ export function isValidHttpUrl(value: string): boolean {
 /** Nomor WhatsApp internasional (E.164): "+" diikuti 8–15 digit. */
 export function isValidWhatsAppNumber(value: string): boolean {
   return /^\+[1-9]\d{7,14}$/.test(value);
+}
+
+/**
+ * Nomor WhatsApp Indonesia untuk profil pengguna & nomor perangkat Fonnte:
+ * format internasional +62 (mis. +6281234567890) — bukan 08xx/628xx tanpa "+".
+ */
+export function isValidIndonesiaMobile(value: string): boolean {
+  return /^\+628[1-9]\d{7,11}$/.test(value);
 }
 
 /** Metadata NON-rahasia yang disimpan sebagai JSON string. */
@@ -331,16 +349,26 @@ async function fetchWithTimeout(url: string, init: RequestInit): Promise<Respons
   }
 }
 
-/** Uji koneksi WhatsApp Cloud API: GET {endpoint}/{phoneId} dengan Bearer token. */
+/**
+ * Uji koneksi Fonnte: POST {endpoint}/device dengan header
+ * Authorization token mentah (TANPA Bearer — sesuai dokumentasi Fonnte).
+ * Hasil = status perangkat AKTUAL dari provider (connect/disconnect/ditolak),
+ * bukan sekadar status HTTP.
+ */
 export async function testWhatsAppConnection(config: {
   endpoint: string | null;
   provider: string;
   credentialEnc: string | null;
   meta: string | null;
-}): Promise<IntegrationTestResult> {
+}): Promise<WhatsAppTestResult> {
   const def = WHATSAPP_PROVIDERS[config.provider as WhatsAppProviderId];
-  if (!def) return { ok: false, note: `Provider "${config.provider}" tidak dikenali.` };
-  if (!config.credentialEnc) return { ok: false, note: "Access token belum diisi." };
+  if (!def) {
+    return {
+      ok: false,
+      note: `Provider "${config.provider}" tidak dikenali (integrasi lama tidak digunakan). Simpan ulang konfigurasi dengan provider Fonnte.`,
+    };
+  }
+  if (!config.credentialEnc) return { ok: false, note: "API token belum diisi." };
 
   let token: string;
   try {
@@ -349,34 +377,12 @@ export async function testWhatsAppConnection(config: {
     return { ok: false, note: "Credential tersimpan tidak dapat dibaca (kunci enkripsi salah)." };
   }
 
-  let meta: Record<string, string> | null = null;
-  try {
-    meta = config.meta ? (JSON.parse(config.meta) as Record<string, string>) : null;
-  } catch {
-    meta = null;
-  }
-  const phoneId = meta?.phoneId?.trim();
-  if (def.needsPhoneId && !phoneId) {
-    return { ok: false, note: "Phone Number ID belum diisi." };
-  }
-
-  const base = (config.endpoint?.trim() || def.defaultEndpoint).replace(/\/+$/, "");
-  const url = `${base}/${encodeURIComponent(phoneId ?? "me")}`;
-
-  try {
-    const res = await fetchWithTimeout(url, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (res.ok) return { ok: true, note: "Koneksi ke provider berhasil." };
-    if (res.status === 401 || res.status === 403) {
-      return { ok: false, note: "Token ditolak provider (401/403). Periksa access token." };
-    }
-    return { ok: false, note: `Provider menolak permintaan (HTTP ${res.status}).` };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, note: `Gagal menghubungi provider: ${sanitizeProviderNote(msg)}` };
-  }
+  const r = await fonnteDeviceProfile({
+    baseUrl: config.endpoint?.trim() || def.defaultEndpoint,
+    token,
+  });
+  // note dari klien Fonnte sudah menyaring token (hideSecret) — aman dicatat/ditampilkan.
+  return { ok: r.ok, note: r.note, device: r.data ?? null };
 }
 
 /** Uji koneksi AI: GET {baseUrl}/models dengan Bearer key. */
@@ -455,12 +461,50 @@ async function getRawConfig(service: IntegrationService, scope: IntegrationScope
   });
 }
 
-/** Muat config + jalankan uji koneksi WhatsApp + catat hasilnya. */
-export async function runWhatsAppTest(scope: IntegrationScope): Promise<IntegrationTestResult> {
+/**
+ * Simpan snapshot status perangkat Fonnte ke meta (NON-rahasia) agar panel
+ * dapat menampilkan "Status koneksi perangkat" setelah uji.
+ * `null` menghapus snapshot (uji gagal → status lama tidak boleh terlihat basi).
+ */
+export async function recordWhatsAppDeviceMeta(
+  scope: IntegrationScope,
+  device: FonnteDevice | null,
+): Promise<void> {
+  const row = await getRawConfig("WHATSAPP", scope);
+  if (!row) return;
+  let meta: Record<string, string> = {};
+  try {
+    meta = row.meta ? (JSON.parse(row.meta) as Record<string, string>) : {};
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) meta = {};
+  } catch {
+    meta = {};
+  }
+  const keys = ["deviceNumber", "deviceStatus", "deviceName", "deviceQuota", "devicePackage", "deviceExpired"];
+  for (const k of keys) delete meta[k];
+  if (device) {
+    meta.deviceNumber = device.number;
+    meta.deviceStatus = device.status;
+    if (device.name) meta.deviceName = device.name;
+    if (device.quota) meta.deviceQuota = device.quota;
+    if (device.package) meta.devicePackage = device.package;
+    if (device.expired) meta.deviceExpired = device.expired;
+  }
+  await prisma.integrationConfig.updateMany({
+    where: { service: "WHATSAPP", scope },
+    data: { meta: Object.keys(meta).length > 0 ? JSON.stringify(meta) : null },
+  });
+}
+
+/**
+ * Muat config + jalankan uji koneksi Fonnte + catat hasilnya.
+ * Snapshot status perangkat ikut disimpan ke meta (untuk tampilan UI).
+ */
+export async function runWhatsAppTest(scope: IntegrationScope): Promise<WhatsAppTestResult> {
   const row = await getRawConfig("WHATSAPP", scope);
   if (!row) return { ok: false, note: "Konfigurasi belum disimpan." };
   const result = await testWhatsAppConnection(row);
-  await recordTestResult("WHATSAPP", scope, result);
+  await recordTestResult("WHATSAPP", scope, { ok: result.ok, note: result.note });
+  await recordWhatsAppDeviceMeta(scope, result.device ?? null);
   return result;
 }
 
@@ -478,9 +522,10 @@ export async function runAiTest(scope: IntegrationScope): Promise<IntegrationTes
 // ---------------------------------------------------------------------------
 
 /**
- * Kirim SATU pesan teks uji via WhatsApp Cloud API ke nomor tujuan.
- * Nomor tujuan divalidasi E.164. Pesan hanya dikirim atas aksi eksplisit
- * pengguna (tombol "Kirim Pesan Uji").
+ * Kirim SATU pesan teks uji via Fonnte (POST {endpoint}/send, FormData) ke
+ * nomor tujuan. Nomor tujuan divalidasi E.164. Pesan hanya dikirim atas aksi
+ * eksplisit pengguna (tombol "Kirim Pesan Uji"). Sukses hanya bila Fonnte
+ * membalas status true — HTTP 2xx saja tidak cukup.
  */
 export async function sendWhatsAppTestMessage(
   scope: IntegrationScope,
@@ -495,7 +540,7 @@ export async function sendWhatsAppTestMessage(
   if (!isValidWhatsAppNumber(to)) {
     return { ok: false, note: "Nomor tujuan tidak valid (format internasional, mis. +62812…)." };
   }
-  if (!row.credentialEnc) return { ok: false, note: "Access token belum diisi." };
+  if (!row.credentialEnc) return { ok: false, note: "API token belum diisi." };
 
   let token: string;
   try {
@@ -505,48 +550,22 @@ export async function sendWhatsAppTestMessage(
   }
 
   const def = WHATSAPP_PROVIDERS[row.provider as WhatsAppProviderId];
-  let meta: Record<string, string> | null = null;
-  try {
-    meta = row.meta ? (JSON.parse(row.meta) as Record<string, string>) : null;
-  } catch {
-    meta = null;
-  }
-  const phoneId = meta?.phoneId?.trim();
-  const base = (row.endpoint?.trim() || def?.defaultEndpoint || "").replace(/\/+$/, "");
-  if (!base || !phoneId) {
-    return { ok: false, note: "Endpoint atau Phone Number ID belum diisi." };
+  if (!def) {
+    return {
+      ok: false,
+      note: `Provider "${row.provider}" tidak dikenali (integrasi lama sudah tidak digunakan).`,
+    };
   }
 
-  const url = `${base}/${encodeURIComponent(phoneId)}/messages`;
-  const body = {
-    messaging_product: "whatsapp",
-    to,
-    type: "text",
-    text: { preview_url: false, body: text },
-  };
-
-  try {
-    const res = await fetchWithTimeout(url, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (res.ok) {
-      await recordTestResult("WHATSAPP", scope, { ok: true, note: "Pesan uji terkirim." });
-      return { ok: true, note: "Pesan uji terkirim." };
-    }
-    const note =
-      res.status === 401 || res.status === 403
-        ? "Token ditolak provider (401/403). Periksa access token."
-        : `Provider menolak pengiriman (HTTP ${res.status}).`;
-    await recordTestResult("WHATSAPP", scope, { ok: false, note });
-    return { ok: false, note };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    const note = `Gagal mengirim pesan: ${sanitizeProviderNote(msg)}`;
-    await recordTestResult("WHATSAPP", scope, { ok: false, note });
-    return { ok: false, note };
-  }
+  const r = await fonnteSendText({
+    baseUrl: row.endpoint?.trim() || def.defaultEndpoint,
+    token,
+    targets: [to],
+    message: text,
+  });
+  const result: IntegrationTestResult = { ok: r.ok, note: r.note };
+  await recordTestResult("WHATSAPP", scope, result);
+  return result;
 }
 
 // ---------------------------------------------------------------------------

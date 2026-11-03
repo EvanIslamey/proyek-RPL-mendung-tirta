@@ -1,11 +1,18 @@
 import type { NextRequest } from "next/server";
 import { ApiError, assertSameOrigin, asTrimmedString, parseJsonBody } from "@/lib/validate";
-import { isValidWhatsAppNumber, requireIntegrationUser, runWhatsAppTest, sendWhatsAppTestMessage } from "@/lib/integrations";
+import {
+  getIntegrationConfig,
+  isValidWhatsAppNumber,
+  requireIntegrationUser,
+  runWhatsAppTest,
+  sendWhatsAppTestMessage,
+} from "@/lib/integrations";
 import { hitRateLimit } from "@/lib/rate-limit";
 
 /**
- * POST /api/settings/whatsapp/test — uji koneksi WhatsApp Cloud API (backend).
- * Hasil yang ditampilkan adalah HASIL AKTUAL permintaan ke provider.
+ * POST /api/settings/whatsapp/test — uji koneksi Fonnte (backend).
+ * Hasil yang ditampilkan adalah HASIL AKTUAL response Fonnte (/device),
+ * termasuk status koneksi perangkat — bukan sekadar status HTTP.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -52,7 +59,12 @@ export async function PUT(request: NextRequest) {
       throw new ApiError(429, `Terlalu banyak percobaan. Coba lagi dalam ${rl.retryAfterSeconds} detik.`);
     }
 
-    const to = asTrimmedString(body.to);
+    let to = asTrimmedString(body.to);
+    if (!to) {
+      // Nomor tidak dikirim → pakai nomor tujuan pengujian tersimpan di konfigurasi.
+      const cfg = await getIntegrationConfig("WHATSAPP", scope);
+      to = cfg?.meta?.testTarget?.trim() || "";
+    }
     if (!isValidWhatsAppNumber(to)) {
       throw new ApiError(400, "Data tidak valid.", {
         to: "Nomor tidak valid. Gunakan format internasional, mis. +6281234567890.",

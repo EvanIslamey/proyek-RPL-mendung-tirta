@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/Toast";
 import { formatDateId } from "@/lib/format";
 import { WhatsAppSettingsPanel } from "@/components/settings/WhatsAppSettingsPanel";
+import { WhatsAppPreferencesPanel } from "@/components/settings/WhatsAppPreferencesPanel";
 import { ApiKeySettingsPanel } from "@/components/settings/ApiKeySettingsPanel";
 import { IntegrationStatusPanel } from "@/components/settings/IntegrationStatusPanel";
 
@@ -327,7 +328,8 @@ export default function AdminProfilePage() {
           marginTop: "1.5rem",
         }}
       >
-        <WhatsAppSettingsPanel />
+        <WhatsAppPreferencesPanel />
+        <WhatsAppSettingsPanel showOps />
         <ApiKeySettingsPanel />
       </div>
       <div style={{ marginTop: "1.5rem" }}>

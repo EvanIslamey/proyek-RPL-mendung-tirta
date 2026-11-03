@@ -1,12 +1,16 @@
 "use client";
 
 /**
- * Panel Pengaturan WhatsApp — untuk halaman Informasi Diri (Admin & Penjual).
+ * Panel Pengaturan WhatsApp (Fonnte) — halaman Informasi Diri (Admin & Penjual).
  *
- * - Admin mengelola konfigurasi WhatsApp GLOBAL aplikasi.
+ * - Admin mengelola konfigurasi WhatsApp GLOBAL aplikasi (+ penerima notifikasi
+ *   operasional, prop `showOps`).
  * - Penjual mengelola konfigurasi WhatsApp MILIKNYA sendiri (scope userId).
- * - Credential tidak pernah dikirim ke frontend (hanya hint tersamarkan).
- * - Uji koneksi & kirim pesan uji dijalankan lewat backend (bukan dari browser).
+ * - API Token Fonnte disimpan terenkripsi di server; frontend hanya menerima
+ *   hint tersamarkan — TIDAK PERNAH ditampilkan kembali utuh.
+ * - Uji koneksi (POST /device), kirim pesan uji (POST /send), dan
+ *   aktifkan/nonaktifkan dijalankan lewat backend (bukan dari browser).
+ * - Field Meta Cloud API lama (Phone Number ID / Access Token) sudah dihapus.
  */
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
@@ -29,26 +33,28 @@ type SafeConfig = {
   lastTestNote: string | null;
 };
 
-const PROVIDERS = [{ id: "meta-whatsapp-cloud", label: "Meta WhatsApp Cloud API" }];
+const PROVIDERS = [{ id: "fonnte", label: "Fonnte WhatsApp Gateway" }];
 
 function statusBadge(cfg: SafeConfig | null): { label: string; cls: string } {
   if (!cfg) return { label: "Belum dikonfigurasi", cls: "badge-muted" };
   if (!cfg.isActive) return { label: "Tersimpan (nonaktif)", cls: "badge-warn" };
-  if (cfg.lastTestOk === true) return { label: "Terkonfigurasi & teruji", cls: "badge-ok" };
+  if (cfg.lastTestOk === true) return { label: "Aktif & teruji", cls: "badge-ok" };
   return { label: "Terkonfigurasi (belum teruji)", cls: "badge-warn" };
 }
 
-export function WhatsAppSettingsPanel() {
+export function WhatsAppSettingsPanel({ showOps = false }: { showOps?: boolean }) {
   const { toast } = useToast();
 
   const [config, setConfig] = useState<SafeConfig | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [provider, setProvider] = useState("meta-whatsapp-cloud");
-  const [phoneId, setPhoneId] = useState("");
+  const [provider, setProvider] = useState("fonnte");
   const [endpoint, setEndpoint] = useState("");
-  const [credential, setCredential] = useState(""); // hanya untuk input baru
+  const [credential, setCredential] = useState(""); // hanya input token BARU
+  const [senderNumber, setSenderNumber] = useState("");
+  const [testTo, setTestTo] = useState(""); // nomor tujuan pengujian (ikut disimpan)
+  const [opsTargets, setOpsTargets] = useState(""); // penerima notifikasi operasional (admin)
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -57,16 +63,21 @@ export function WhatsAppSettingsPanel() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [sending, setSending] = useState(false);
-  const [testTo, setTestTo] = useState("");
+  const [toggling, setToggling] = useState(false);
 
-  const applyConfig = useCallback((cfg: SafeConfig | null) => {
-    setConfig(cfg);
-    if (cfg) {
-      setProvider(cfg.provider);
-      setPhoneId(cfg.meta?.phoneId ?? "");
-      setEndpoint(cfg.endpoint ?? "");
-    }
-  }, []);
+  const applyConfig = useCallback(
+    (cfg: SafeConfig | null) => {
+      setConfig(cfg);
+      if (cfg) {
+        setProvider(cfg.provider);
+        setEndpoint(cfg.endpoint ?? "");
+        setSenderNumber(cfg.meta?.senderNumber ?? "");
+        setTestTo(cfg.meta?.testTarget ?? "");
+        setOpsTargets(cfg.meta?.opsTargets ?? "");
+      }
+    },
+    [],
+  );
 
   const load = useCallback(() => {
     fetch("/api/settings/whatsapp", { cache: "no-store" })
@@ -104,9 +115,13 @@ export function WhatsAppSettingsPanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           provider,
-          meta: { phoneId },
+          meta: {
+            ...(testTo ? { testTarget: testTo } : {}),
+            ...(senderNumber ? { senderNumber } : {}),
+            ...(opsTargets ? { opsTargets } : {}),
+          },
           endpoint: endpoint || undefined,
-          credential: credential || undefined,
+          credential: credential || undefined, // kosong = token lama dipertahankan
         }),
       });
       const data: { message?: string; fields?: Record<string, string>; config?: SafeConfig } =
@@ -117,7 +132,7 @@ export function WhatsAppSettingsPanel() {
         return;
       }
       if (data.config) applyConfig(data.config);
-      setCredential(""); // bersihkan input credential dari memori form
+      setCredential(""); // bersihkan token dari memori form
       setTestResult(null);
       toast("Konfigurasi WhatsApp tersimpan.");
     } catch {
@@ -141,7 +156,7 @@ export function WhatsAppSettingsPanel() {
       if (data.result) {
         setTestResult(data.result);
         toast(data.result.note, data.result.ok ? "success" : "error");
-        load(); // segarkan badge status + lastTest
+        load(); // segarkan status perangkat (meta.device*) + badge + lastTest
       }
     } catch {
       setTestResult({ ok: false, note: "Tidak dapat terhubung ke server." });
@@ -178,6 +193,31 @@ export function WhatsAppSettingsPanel() {
     }
   }
 
+  async function onToggle() {
+    if (toggling || !config) return;
+    setToggling(true);
+    setSaveError(null);
+    try {
+      const next = !config.isActive;
+      const res = await fetch("/api/settings/whatsapp/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isActive: next }),
+      });
+      const data: { message?: string; config?: SafeConfig } = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSaveError(data.message ?? "Gagal mengubah status konfigurasi.");
+        return;
+      }
+      if (data.config) applyConfig(data.config);
+      toast(data.message ?? (next ? "Konfigurasi diaktifkan." : "Konfigurasi dinonaktifkan."));
+    } catch {
+      setSaveError("Tidak dapat terhubung ke server.");
+    } finally {
+      setToggling(false);
+    }
+  }
+
   if (!loaded && loadError) {
     return (
       <section className="dash-panel" style={{ marginBottom: 0 }}>
@@ -190,6 +230,8 @@ export function WhatsAppSettingsPanel() {
   }
 
   const badge = statusBadge(config);
+  const meta = config?.meta ?? null;
+  const deviceStatus = meta?.deviceStatus ?? null;
 
   return (
     <section className="dash-panel" style={{ marginBottom: 0 }}>
@@ -207,8 +249,8 @@ export function WhatsAppSettingsPanel() {
       </div>
 
       <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginTop: "0.35rem" }}>
-        Konfigurasi ini disimpan aman di server (terenkripsi). Credential tidak pernah ditampilkan
-        kembali utuh. Pengujian dijalankan lewat server, bukan browser.
+        Provider: <strong>Fonnte WhatsApp Gateway</strong>. API Token disimpan terenkripsi di server
+        dan tidak pernah dikirim ke browser. Pengujian dijalankan lewat server, bukan browser.
       </p>
 
       {loadError && (
@@ -233,44 +275,16 @@ export function WhatsAppSettingsPanel() {
                 </option>
               ))}
             </select>
-            <span style={{ fontSize: "0.75rem", fontWeight: 400 }}>
-              Provider lain (WhatsApp Business API pihak ketiga) dapat ditambahkan sebagai adapter.
-            </span>
           </label>
 
           <label className="dash-form-field">
-            <span>Phone Number ID (WhatsApp Business) *</span>
-            <input
-              type="text"
-              value={phoneId}
-              onChange={(e) => setPhoneId(e.target.value)}
-              maxLength={100}
-              placeholder="ID nomor dari Meta Business Suite"
-              required
-            />
-            {fields.phoneId && <span className="field-error">{fields.phoneId}</span>}
-          </label>
-
-          <label className="dash-form-field">
-            <span>API endpoint / URL (opsional)</span>
-            <input
-              type="url"
-              value={endpoint}
-              onChange={(e) => setEndpoint(e.target.value)}
-              maxLength={500}
-              placeholder="https://graph.facebook.com/v21.0"
-            />
-            {fields.endpoint && <span className="field-error">{fields.endpoint}</span>}
-          </label>
-
-          <label className="dash-form-field">
-            <span>Access token {config?.hasCredential ? "(kosongkan untuk mempertahankan)" : "*"}</span>
+            <span>API Token Fonnte {config?.hasCredential ? "(kosongkan untuk mempertahankan)" : "*"}</span>
             <input
               type="password"
               value={credential}
               onChange={(e) => setCredential(e.target.value)}
               autoComplete="off"
-              placeholder={config?.hasCredential ? "•••••••• (tersimpan)" : "Masukkan access token"}
+              placeholder={config?.hasCredential ? "•••••••• (tersimpan)" : "Tempel token dari menu Device"}
               required={!config?.hasCredential}
             />
             {fields.credential && <span className="field-error">{fields.credential}</span>}
@@ -282,7 +296,23 @@ export function WhatsAppSettingsPanel() {
           </label>
 
           <label className="dash-form-field">
-            <span>Nomor WhatsApp tujuan (E.164, mis. +62812…) untuk pesan uji</span>
+            <span>Nomor WhatsApp pengirim / perangkat (opsional, format +62)</span>
+            <input
+              type="tel"
+              value={senderNumber}
+              onChange={(e) => setSenderNumber(e.target.value)}
+              maxLength={20}
+              placeholder="+6281234567890"
+            />
+            {fields.senderNumber && <span className="field-error">{fields.senderNumber}</span>}
+            <span style={{ fontSize: "0.75rem", fontWeight: 400 }}>
+              Nomor resmi pengirim = nomor perangkat yang terhubung di Fonnte (lihat status koneksi
+              di bawah setelah Uji Koneksi).
+            </span>
+          </label>
+
+          <label className="dash-form-field">
+            <span>Nomor WhatsApp tujuan pengujian (E.164, mis. +62812…)</span>
             <input
               type="tel"
               value={testTo}
@@ -290,6 +320,38 @@ export function WhatsAppSettingsPanel() {
               placeholder="+6281234567890"
               maxLength={20}
             />
+            {fields.testTarget && <span className="field-error">{fields.testTarget}</span>}
+          </label>
+
+          {showOps && (
+            <label className="dash-form-field">
+              <span>Penerima notifikasi operasional (admin)</span>
+              <input
+                type="tel"
+                value={opsTargets}
+                onChange={(e) => setOpsTargets(e.target.value)}
+                placeholder="+6281234567890, +6289876543210"
+                maxLength={200}
+              />
+              {fields.opsTargets && <span className="field-error">{fields.opsTargets}</span>}
+              <span style={{ fontSize: "0.75rem", fontWeight: 400 }}>
+                Nomor (dipisah koma) yang menerima pesan WhatsApp operasional untuk akun ADMIN
+                (pesanan baru, pembayaran, pengguna baru, aktivitas penting). Kosongkan untuk memakai
+                nomor profil admin masing-masing.
+              </span>
+            </label>
+          )}
+
+          <label className="dash-form-field">
+            <span>API endpoint / URL (opsional)</span>
+            <input
+              type="url"
+              value={endpoint}
+              onChange={(e) => setEndpoint(e.target.value)}
+              maxLength={500}
+              placeholder="https://api.fonnte.com"
+            />
+            {fields.endpoint && <span className="field-error">{fields.endpoint}</span>}
           </label>
         </div>
 
@@ -322,11 +384,20 @@ export function WhatsAppSettingsPanel() {
               !config?.isActive
                 ? "Aktifkan & uji koneksi dulu"
                 : !testTo
-                  ? "Isi nomor tujuan"
+                  ? "Isi nomor tujuan pengujian"
                   : undefined
             }
           >
             {sending ? "Mengirim…" : "Kirim Pesan Uji"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline"
+            onClick={onToggle}
+            disabled={toggling || !config}
+            title={!config?.lastTestOk ? "Jalankan uji koneksi dulu" : undefined}
+          >
+            {toggling ? "Memproses…" : config?.isActive ? "Nonaktifkan" : "Aktifkan"}
           </button>
         </div>
       </form>
@@ -351,12 +422,37 @@ export function WhatsAppSettingsPanel() {
         >
           <div>
             Status: <strong>{config.isActive ? "Aktif" : "Nonaktif"}</strong>
+            {" · "}Provider: <strong>{config.providerLabel}</strong>
           </div>
+
+          {/* Status koneksi perangkat Fonnte (hasil Uji Koneksi terakhir). */}
+          <div>
+            Status koneksi perangkat:{" "}
+            {!deviceStatus ? (
+              <strong>belum diketahui (jalankan Uji Koneksi)</strong>
+            ) : deviceStatus === "connect" ? (
+              <>
+                <strong style={{ color: "var(--ok, #16a34a)" }}>Terhubung</strong> — {meta?.deviceNumber}
+                {meta?.deviceName ? ` (${meta.deviceName})` : ""}
+                {meta?.deviceQuota ? `, sisa kuota ${meta.deviceQuota}` : ""}
+                {meta?.devicePackage ? `, paket ${meta.devicePackage}` : ""}
+                {meta?.deviceExpired ? `, berlaku s/d ${meta.deviceExpired}` : ""}
+              </>
+            ) : (
+              <>
+                <strong style={{ color: "#dc2626" }}>Terputus ({deviceStatus})</strong>
+                {meta?.deviceNumber ? ` — ${meta.deviceNumber}` : ""} — hubungkan perangkat di
+                dashboard Fonnte.
+              </>
+            )}
+          </div>
+
           {config.lastTestAt && (
             <div>
               Uji terakhir:{" "}
               {config.lastTestOk === true ? "berhasil" : config.lastTestOk === false ? "gagal" : "—"}{" "}
               ({new Date(config.lastTestAt).toLocaleString("id-ID")})
+              {config.lastTestNote ? ` — ${config.lastTestNote}` : ""}
             </div>
           )}
         </div>
@@ -370,24 +466,30 @@ export function WhatsAppSettingsPanel() {
           lineHeight: 1.5,
         }}
       >
-        <strong>Petunjuk Meta (WhatsApp Cloud API):</strong>
+        <strong>Petunjuk Fonnte (WhatsApp Gateway):</strong>
         <ul style={{ margin: "0.3rem 0 0", paddingLeft: "1.1rem" }}>
           <li>
-            <strong>Phone Number ID</strong> diambil dari Meta Developer Dashboard → App → WhatsApp →
-            API Setup (berupa angka ID), bukan email admin atau nomor WhatsApp tujuan.
+            <strong>Hubungkan perangkat:</strong> dashboard Fonnte → menu <strong>Device</strong> →{" "}
+            <strong>Connect</strong> → buka WhatsApp di ponsel → Perangkat Tertaut → Tautkan
+            perangkat → pindai QR. Pastikan status sudah “connect” sebelum menguji.
           </li>
           <li>
-            <strong>Access token</strong> juga dari halaman yang sama (token uji sementara atau token
-            permanen). Token disimpan terenkripsi di server dan tidak pernah ditampilkan kembali.
+            <strong>API Token</strong> disalin dari menu Device (klik token untuk menyalin). Token
+            disimpan terenkripsi di server, tidak pernah ditampilkan utuh, dan tidak perlu dikirim
+            lewat chat. Kosongkan field saat menyimpan bila ingin mempertahankan token lama.
           </li>
           <li>
-            Pesan uji memakai format teks biasa. Di luar jendela 24 jam sejak pelanggan menghubungi
-            Anda, Meta hanya mengizinkan pesan yang memakai <strong>template disetujui</strong> —
-            bila pengiriman ditolak provider, buat template di Meta Manager atau mulai percakapan
-            dari nomor tujuan lebih dulu.
+            <strong>Uji Koneksi</strong> membaca status perangkat nyata dari Fonnte (nomor, status
+            connect/putus, sisa kuota, masa berlaku). <strong>Kirim Pesan Uji</strong> hanya
+            mengirim ketika tombol ditekan dan konfigurasi sudah aktif.
           </li>
           <li>
-            Nomor tujuan harus bersedia menerima pesan (opt-in) dari nomor WhatsApp Business Anda.
+            Nomor tujuan uji/notifikasi harus menyimpan nomor pengirim Anda (opt-in). Pengiriman
+            bergantung status perangkat &amp; kuota paket Fonnte Anda.
+          </li>
+          <li>
+            Notifikasi WhatsApp berjalan otomatis setelah konfigurasi GLOBAL aktif: penerima memakai
+            nomor profil (+62) dengan persetujuan pengguna, atau nomor penerima operasional (admin).
           </li>
         </ul>
       </div>
@@ -400,9 +502,10 @@ export function WhatsAppSettingsPanel() {
           lineHeight: 1.5,
         }}
       >
-        <strong>Catatan webhook:</strong> server lokal (localhost) tidak dapat menerima webhook dari
-        internet tanpa tunnel (mis. ngrok) atau endpoint publik. Fitur ini hanya untuk pengiriman
-        keluar (outbound). Jangan mengekspos server lokal secara otomatis.
+        <strong>Catatan webhook:</strong> integrasi ini hanya untuk pengiriman keluar (outbound).
+        Webhook masuk Fonnte membutuhkan endpoint HTTPS publik — server lokal (localhost) tidak
+        diekspos ke internet tanpa persetujuan Anda (tunnel/endpoint publik bila suatu saat
+        diperlukan).
       </p>
     </section>
   );

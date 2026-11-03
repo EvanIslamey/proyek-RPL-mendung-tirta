@@ -2,10 +2,31 @@ import { Prisma } from "../../prisma/generated/client";
 import { prisma } from "./prisma";
 import { ApiError } from "./validate";
 import type { SafeUser } from "./auth";
-import { dispatchEmails, notifyInTx } from "./notify";
+import { dispatchEmails, notifyInTx, type NotifyInput } from "./notify";
 import { stockAlertThreshold } from "./ai-context";
 
 const rupiah = (n: number): string => `Rp${Math.round(n).toLocaleString("id-ID")}`;
+
+/**
+ * Buat notifikasi identik ke SEMUA admin aktif DALAM transaksi `tx` dan
+ * kumpulkan id-nya ke `notifyIds` (in-app + email; WhatsApp operasional hanya
+ * dikirim dari SATU baris admin — aturan anti ganda ada di resolveWaEligibility).
+ */
+async function pushAdminNotices(
+  tx: Prisma.TransactionClient,
+  notifyIds: string[],
+  notice: Omit<NotifyInput, "userId">,
+): Promise<void> {
+  const admins = await tx.user.findMany({
+    where: { role: "ADMIN", isActive: true },
+    select: { id: true },
+    orderBy: { createdAt: "asc" },
+  });
+  for (const a of admins) {
+    const id = await notifyInTx(tx, { ...notice, userId: a.id });
+    if (id) notifyIds.push(id);
+  }
+}
 
 /** Transisi status order yang sah (untuk penjual/admin). */
 export const ORDER_TRANSITIONS: Record<string, string[]> = {
@@ -243,6 +264,21 @@ export async function createOrder(input: {
         );
       }
 
+      // 4. Admin: pesanan baru (in-app; WA operasional bila penerima dikonfigurasi).
+      await pushAdminNotices(tx, notifyIds, {
+        kind: "ORDER_CREATED",
+        title: `Pesanan baru #${shortId}`,
+        body: [
+          `${buyer.name} memesan ${validItems.length} item senilai ${rupiah(Number(order.total))}.`,
+          "Item:",
+          ...itemLines,
+          `Dikirim ke: ${shippingAddress}`,
+          "Status: PENDING (menunggu pembayaran).",
+        ].join("\n"),
+        link: "/admin/orders",
+        dedupeKey: `order:${order.id}:admin:created`,
+      });
+
       return order.id;
     });
 
@@ -341,6 +377,18 @@ export async function payOrder(user: SafeUser, orderId: string): Promise<void> {
         }),
       );
     }
+
+    // Admin: pembayaran dikonfirmasi (in-app; WA operasional bila dikonfigurasi).
+    await pushAdminNotices(tx, notifyIds, {
+      kind: "PAYMENT_CONFIRMED",
+      title: `Pembayaran pesanan #${shortId} dikonfirmasi`,
+      body: [
+        `Pembayaran ${rupiah(Number(order.payment?.amount ?? order.total))} untuk pesanan #${shortId} diterima.`,
+        "Status pesanan kini PROCESSING (diproses penjual).",
+      ].join("\n"),
+      link: "/admin/orders",
+      dedupeKey: `order:${order.id}:admin:paid`,
+    });
   });
 
   void dispatchEmails(notifyIds);
@@ -458,6 +506,15 @@ async function cancelOrderCore(
         }),
       );
     }
+
+    // Admin: pembatalan pesanan (aktivitas penting marketplace).
+    await pushAdminNotices(tx, notifyIds, {
+      kind: "ORDER_STATUS_CHANGED",
+      title: `Pesanan #${shortId} dibatalkan`,
+      body: `Pesanan #${shortId} senilai ${rupiah(Number(order.total))} kini CANCELLED.${restock ? " Stok produk telah dikembalikan." : ""}`,
+      link: "/admin/orders",
+      dedupeKey: `order:${order.id}:admin:cancelled`,
+    });
   });
 
   void dispatchEmails(notifyIds);
@@ -484,7 +541,14 @@ export async function setOrderStatus(orderId: string, newStatus: string): Promis
   await prisma.$transaction(async (tx) => {
     const order = await tx.order.findUnique({
       where: { id: orderId },
-      select: { id: true, buyerId: true, status: true },
+      select: {
+        id: true,
+        buyerId: true,
+        status: true,
+        orderItems: {
+          select: { product: { select: { store: { select: { userId: true } } } } },
+        },
+      },
     });
     if (!order) throw new ApiError(404, "Pesanan tidak ditemukan.");
     if (order.status === newStatus) {
@@ -506,6 +570,29 @@ export async function setOrderStatus(orderId: string, newStatus: string): Promis
       dedupeKey: `order:${order.id}:status:${newStatus}`,
     });
     if (id) notifyIds.push(id);
+
+    // Penjual terkait: perubahan status pesanan (proses/kirim/selesai).
+    const sellerIds = new Set(order.orderItems.map((i) => i.product.store.userId));
+    for (const sellerId of sellerIds) {
+      const sid = await notifyInTx(tx, {
+        userId: sellerId,
+        kind: "ORDER_STATUS_CHANGED",
+        title: `Pesanan #${shortId} kini ${STATUS_LABEL_ID[newStatus] ?? newStatus}`,
+        body: `Pesanan berisi produk Anda (#${shortId}) diperbarui: ${order.status} → ${newStatus} (${STATUS_LABEL_ID[newStatus] ?? newStatus}).`,
+        link: "/seller/orders",
+        dedupeKey: `order:${order.id}:status:${newStatus}:seller:${sellerId}`,
+      });
+      if (sid) notifyIds.push(sid);
+    }
+
+    // Admin: perubahan status non-pembatalan (aktivitas penting).
+    await pushAdminNotices(tx, notifyIds, {
+      kind: "ORDER_STATUS_CHANGED",
+      title: `Pesanan #${shortId} kini ${STATUS_LABEL_ID[newStatus] ?? newStatus}`,
+      body: `Status pesanan #${shortId} diperbarui: ${order.status} → ${newStatus} (${STATUS_LABEL_ID[newStatus] ?? newStatus}).`,
+      link: "/admin/orders",
+      dedupeKey: `order:${order.id}:admin:status:${newStatus}`,
+    });
   });
 
   void dispatchEmails(notifyIds);

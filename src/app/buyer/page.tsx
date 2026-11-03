@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/Toast";
 import { formatDateId } from "@/lib/format";
+import { WhatsAppPreferencesPanel } from "@/components/settings/WhatsAppPreferencesPanel";
 
 type Profile = {
   id: string;
@@ -510,6 +511,11 @@ export default function BuyerProfilePage() {
             </>
           )}
         </section>
+      </div>
+
+      {/* Preferensi notifikasi WhatsApp milik pengguna (opt-in + nomor +62). */}
+      <div style={{ marginTop: "1.5rem" }}>
+        <WhatsAppPreferencesPanel />
       </div>
     </>
   );

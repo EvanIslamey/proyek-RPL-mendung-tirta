@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Test logika integrasi (WhatsApp & API Key AI):
@@ -28,7 +28,9 @@ vi.mock("./auth", () => ({
 
 import { prisma } from "@/lib/prisma";
 import {
+  WHATSAPP_PROVIDERS,
   isValidHttpUrl,
+  isValidIndonesiaMobile,
   isValidWhatsAppNumber,
   resolveAiRuntime,
   sanitizeMeta,
@@ -36,6 +38,7 @@ import {
   scopeForUser,
   setIntegrationActive,
   testAiConnection,
+  testWhatsAppConnection,
 } from "@/lib/integrations";
 import { encryptSecret } from "@/lib/secret-store";
 import type { SafeUser } from "@/lib/auth";
@@ -347,5 +350,117 @@ describe("setIntegrationActive — guard aktivasi", () => {
     const r = await setIntegrationActive("AI_PROVIDER", "", true);
     expect(r.ok).toBe(false);
     expect(cfg.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("Provider WhatsApp — migrasi Meta → Fonnte", () => {
+  it("hanya Fonnte yang didukung; default endpoint resmi Fonnte", () => {
+    expect(Object.keys(WHATSAPP_PROVIDERS)).toEqual(["fonnte"]);
+    expect(WHATSAPP_PROVIDERS.fonnte.label).toContain("Fonnte");
+    expect(WHATSAPP_PROVIDERS.fonnte.defaultEndpoint).toBe("https://api.fonnte.com");
+  });
+
+  it("isValidIndonesiaMobile: +628… diterima, format lain ditolak", () => {
+    expect(isValidIndonesiaMobile("+6281234567890")).toBe(true);
+    expect(isValidIndonesiaMobile("081234567890")).toBe(false);
+    expect(isValidIndonesiaMobile("+627111222333")).toBe(false);
+    expect(isValidIndonesiaMobile("")).toBe(false);
+  });
+});
+
+describe("testWhatsAppConnection — uji koneksi Fonnte (bukan sekadar HTTP 200)", () => {
+  const base = { endpoint: null as string | null, provider: "fonnte", meta: null as string | null };
+  const enc = encryptSecret("fmk_test_token_secret_value");
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("response sukses → ok + snapshot perangkat + Authorization TANPA Bearer", async () => {
+    const spy = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            device: "6281234567890",
+            device_status: "connect",
+            name: "Toko Demo",
+            quota: "90",
+            package: "Reguler",
+            expired: "18 November 2029",
+            status: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", spy);
+
+    const r = await testWhatsAppConnection({ ...base, credentialEnc: enc });
+    expect(r.ok).toBe(true);
+    expect(r.device?.number).toBe("6281234567890");
+    expect(r.device?.status).toBe("connect");
+
+    const [url, init] = spy.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://api.fonnte.com/device");
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("fmk_test_token_secret_value");
+    expect(headers.Authorization).not.toMatch(/^Bearer/i);
+  });
+
+  it("HTTP 200 tapi response gagal (status:false) → GAGAL jujur", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ status: false, reason: "token invalid" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+    );
+    const r = await testWhatsAppConnection({ ...base, credentialEnc: enc });
+    expect(r.ok).toBe(false);
+    expect(r.note).toContain("token invalid");
+    expect(r.note).not.toContain("fmk_test_token_secret_value");
+  });
+
+  it("perangkat terdaftar tapi disconnect → gagal + info perangkat tersedia", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ device: "6281234567890", device_status: "disconnect", status: true }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        ),
+    );
+    const r = await testWhatsAppConnection({ ...base, credentialEnc: enc });
+    expect(r.ok).toBe(false);
+    expect(r.note).toContain("disconnect");
+    expect(r.device?.number).toBe("6281234567890");
+  });
+
+  it("provider LAMA (meta-whatsapp-cloud) → ditolak, TANPA panggilan jaringan", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const r = await testWhatsAppConnection({
+      endpoint: null,
+      provider: "meta-whatsapp-cloud",
+      credentialEnc: enc,
+      meta: null,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.note).toContain("tidak dikenali");
+    expect(r.note).toContain("Fonnte");
+    expect(spy).not.toHaveBeenCalled(); // integrasi lama tidak pernah dihubungi
+  });
+
+  it("token belum diisi → jujur, tanpa panggilan jaringan", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const r = await testWhatsAppConnection({ ...base, credentialEnc: null });
+    expect(r.ok).toBe(false);
+    expect(r.note).toContain("API token");
+    expect(spy).not.toHaveBeenCalled();
   });
 });
