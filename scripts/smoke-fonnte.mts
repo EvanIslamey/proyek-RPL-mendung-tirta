@@ -238,9 +238,12 @@ async function main() {
   const orderIds = new Set(orderSnapshot.map((o) => o.id));
   const notifSnapshot = await prisma.notification.findMany({ select: { id: true } });
   const notifIds = new Set(notifSnapshot.map((n) => n.id));
+  // Baris WA (konfigurasi ASLI) disnapshot dulu sebelum dibersihkan untuk uji,
+  // lalu DIPULIHKAN di finally — jangan pernah menghapus konfigurasi asli permanen.
+  const waSnapshot = await prisma.integrationConfig.findMany({ where: { service: "WHATSAPP" } });
   await prisma.integrationConfig.deleteMany({ where: { service: "WHATSAPP" } });
   console.log(
-    `[snapshot] users=${userSnapshot.length} products=${productSnapshot.length} orders=${orderSnapshot.length} notif=${notifSnapshot.length}; baris WA uji dibersihkan.`,
+    `[snapshot] users=${userSnapshot.length} products=${productSnapshot.length} orders=${orderSnapshot.length} notif=${notifSnapshot.length}; baris WA uji dibersihkan (${waSnapshot.length} baris asli disnapshot).`,
   );
 
   await new Promise<void>((resolve) => mockServer.listen(MOCK_PORT, "127.0.0.1", resolve));
@@ -682,13 +685,34 @@ async function main() {
       );
 
       // Tidak ada baris yang nyangkut di SENDING + config AI masih utuh.
-      const stuckAny = await prisma.notification.count({
-        where: {
-          waStatus: "SENDING",
-          OR: [o2, o3].map((id) => ({ dedupeKey: { contains: id } })),
-        },
+      // Tunggu dulu baris o2/o3 keluar dari SENDING (baris admin/ops atau
+      // retry kadang masih diproses saat baris buyer sudah FAILED) — jika
+      // benar-benar nyangkut, waitFor akan timeout dan hitungan tetap > 0.
+      const stuckWhere = {
+        waStatus: "SENDING" as const,
+        OR: [o2, o3].map((id) => ({ dedupeKey: { contains: id } })),
+      };
+      await waitFor(async () => (await prisma.notification.count({ where: stuckWhere })) === 0, 15_000);
+      const stuckRows = await prisma.notification.findMany({
+        where: stuckWhere,
+        select: { id: true, kind: true, userId: true, waAttempts: true, waError: true, dedupeKey: true },
       });
-      check("C. Tidak ada notifikasi uji nyangkut di SENDING", stuckAny === 0, `stuck=${stuckAny}`);
+      const stuckAny = stuckRows.length;
+      check(
+        "C. Tidak ada notifikasi uji nyangkut di SENDING",
+        stuckAny === 0,
+        stuckAny === 0
+          ? "stuck=0"
+          : `stuck=${stuckAny} ` +
+            JSON.stringify(
+              stuckRows.map((r) => ({
+                kind: r.kind,
+                att: r.waAttempts,
+                err: (r.waError ?? "").slice(0, 40),
+                key: (r.dedupeKey ?? "").slice(0, 60),
+              })),
+            ),
+      );
       const aiOk = await prisma.integrationConfig.findFirst({
         where: { service: "AI_PROVIDER", isActive: true },
       });
@@ -723,6 +747,12 @@ async function main() {
       await prisma.order.deleteMany({ where: { id: { notIn: [...orderIds] } } });
       await prisma.notification.deleteMany({ where: { id: { notIn: [...notifIds] } } });
       await prisma.integrationConfig.deleteMany({ where: { service: "WHATSAPP" } });
+      // Kembalikan baris WA ASLI hasil snapshot (id/meta/credential utuh).
+      let waRestored = 0;
+      if (waSnapshot.length > 0) {
+        await prisma.integrationConfig.createMany({ data: waSnapshot });
+        waRestored = await prisma.integrationConfig.count({ where: { service: "WHATSAPP" } });
+      }
       for (const u of userSnapshot) {
         await prisma.user.updateMany({
           where: { id: u.id },
@@ -736,7 +766,7 @@ async function main() {
         where: { service: "AI_PROVIDER", isActive: true },
       });
       console.log(
-        `[restore] order uji dihapus, notifikasi uji dihapus, profil user & stok dipulihkan, baris WA dihapus. AI aktif: ${aiStill ? aiStill.provider : "TIDAK ADA!"}`,
+        `[restore] order uji dihapus, notifikasi uji dihapus, profil user & stok dipulihkan, baris WA asli dipulihkan (${waRestored}/${waSnapshot.length}). AI aktif: ${aiStill ? aiStill.provider : "TIDAK ADA!"}`,
       );
     } catch (e) {
       console.error("[restore] GAGAL memulihkan:", e);

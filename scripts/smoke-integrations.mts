@@ -93,8 +93,9 @@ async function main() {
   const userSnapshot = await prisma.user.findMany({
     select: { id: true, phone: true, whatsappNotify: true },
   });
-  // Baris WHATSAPP hanya artefak uji (audit: DB awal tanpa config WA) —
-  // bersihkan di awal agar titik-awal deterministik. Config AI TIDAK disentuh.
+  // Baris WHATSAPP dibersihkan di awal agar titik-awal deterministik; seluruh
+  // config (termasuk WA asli) disnapshot di cfgSnapshot & dipulihkan di finally.
+  // Config AI TIDAK disentuh selama run.
   await prisma.integrationConfig.deleteMany({ where: { service: "WHATSAPP" } });
   console.log(
     `[snapshot] ${cfgSnapshot.length} konfigurasi tersimpan, ${userSnapshot.length} profil user, baris WA uji dibersihkan.`,

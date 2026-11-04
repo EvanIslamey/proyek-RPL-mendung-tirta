@@ -15,6 +15,7 @@ import {
   parseOpsTargets,
   retryDelayMs,
   sanitizeEmailError,
+  telegramGateAllows,
   telegramSendOnce,
 } from "./notify";
 
@@ -31,6 +32,18 @@ describe("telegramSendOnce — anti duplikat akibat retry", () => {
     expect(telegramSendOnce(1)).toBe(false);
     expect(telegramSendOnce(2)).toBe(false);
     expect(telegramSendOnce(EMAIL_MAX_ATTEMPTS - 1)).toBe(false);
+  });
+});
+
+describe("telegramGateAllows — gerbang panel Pengaturan Telegram", () => {
+  it("tanpa baris konfigurasi (null/undefined) → perilaku lama: kanal tetap kirim", () => {
+    expect(telegramGateAllows(null)).toBe(true);
+    expect(telegramGateAllows(undefined)).toBe(true);
+  });
+
+  it("ada baris konfigurasi → mengikuti tombol Aktifkan/Nonaktifkan panel", () => {
+    expect(telegramGateAllows(true)).toBe(true);
+    expect(telegramGateAllows(false)).toBe(false);
   });
 });
 

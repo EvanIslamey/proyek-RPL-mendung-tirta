@@ -15,6 +15,9 @@
  *   dengan header Authorization token mentah (tanpa Bearer). Provider lama
  *   (Meta Cloud API) TIDAK lagi digunakan untuk pengiriman.
  * - AI_PROVIDER: OpenAI-compatible / NVIDIA NIM (GET {base}/models untuk uji).
+ * - TELEGRAM: "telegram-bot" (Telegram Bot API). Uji via GET /bot{token}/getMe,
+ *   kirim uji via sendMessage ke Chat ID tersimpan — panel khusus ADMIN,
+ *   independen dari WhatsApp/Fonnte (toggle satu tidak memengaruhi lainnya).
  *
  * Kredensial TIDAK PERNAH dikirim ke frontend, dicatat ke log, atau
  * dimasukkan ke pesan error.
@@ -26,6 +29,7 @@ import { decryptSecret, encryptSecret, maskSecret } from "./secret-store";
 import { requireUser } from "./auth";
 import type { SafeUser } from "./auth";
 import { fonnteDeviceProfile, fonnteSendText, type FonnteDevice } from "./fonnte";
+import { isValidChatId, sendTelegramMessage } from "./telegram";
 
 // ---------------------------------------------------------------------------
 // Tipe
@@ -35,6 +39,7 @@ export type IntegrationScope = "" | string; // "" = global (ADMIN); lain = userI
 
 export type WhatsAppProviderId = "fonnte";
 export type AiProviderId = "openai-compatible";
+export type TelegramProviderId = "telegram-bot";
 
 export const WHATSAPP_PROVIDERS: Record<
   WhatsAppProviderId,
@@ -51,6 +56,11 @@ export const AI_PROVIDERS: Record<AiProviderId, { label: string; defaultBaseUrl:
     label: "OpenAI-compatible (OpenAI / NVIDIA NIM / ds.)",
     defaultBaseUrl: "https://integrate.api.nvidia.com/v1",
   },
+};
+
+/** Provider Telegram: endpoint resmi tetap (api.telegram.org) — tanpa konfigurasi URL. */
+export const TELEGRAM_PROVIDERS: Record<TelegramProviderId, { label: string }> = {
+  "telegram-bot": { label: "Telegram Bot API" },
 };
 
 /** Bentuk aman (tanpa credential) yang boleh dikirim ke frontend. */
@@ -168,6 +178,8 @@ export function toSafeConfig(row: ConfigRow): SafeIntegrationConfig {
   let providerLabel = row.provider;
   if (row.service === "WHATSAPP") {
     providerLabel = WHATSAPP_PROVIDERS[row.provider as WhatsAppProviderId]?.label ?? row.provider;
+  } else if (row.service === "TELEGRAM") {
+    providerLabel = TELEGRAM_PROVIDERS[row.provider as TelegramProviderId]?.label ?? row.provider;
   } else {
     providerLabel = AI_PROVIDERS[row.provider as AiProviderId]?.label ?? row.provider;
   }
@@ -569,6 +581,189 @@ export async function sendWhatsAppTestMessage(
 }
 
 // ---------------------------------------------------------------------------
+// Telegram (Bot API) — panel Pengaturan Telegram (khusus ADMIN)
+// ---------------------------------------------------------------------------
+
+export type TelegramTestResult = IntegrationTestResult & { username?: string };
+
+/**
+ * Ambil Bot Token: terenkripsi di DB → fallback env `TELEGRAM_BOT_TOKEN`
+ * (data lama yang selama ini dipakai notifikasi). Token TIDAK PERNAH dicatat
+ * ke log atau disertakan dalam pesan yang dikirim ke frontend.
+ */
+function resolveTelegramToken(row: { credentialEnc: string | null }): string | null {
+  if (row.credentialEnc) {
+    try {
+      const t = decryptSecret(row.credentialEnc).trim();
+      if (t) return t;
+    } catch {
+      // Kunci enkripsi berubah → jatuh ke env bila tersedia.
+    }
+  }
+  return process.env.TELEGRAM_BOT_TOKEN?.trim() || null;
+}
+
+/** Meta NON-rahasia panel Telegram (server-side only). */
+async function recordTelegramMeta(
+  scope: IntegrationScope,
+  patch: Record<string, string | null>,
+): Promise<void> {
+  const row = await getRawConfig("TELEGRAM", scope);
+  if (!row) return;
+  let meta: Record<string, string> = {};
+  try {
+    meta = row.meta ? (JSON.parse(row.meta) as Record<string, string>) : {};
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) meta = {};
+  } catch {
+    meta = {};
+  }
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null) delete meta[k];
+    else meta[k] = v;
+  }
+  await prisma.integrationConfig.updateMany({
+    where: { service: "TELEGRAM", scope },
+    data: { meta: Object.keys(meta).length > 0 ? JSON.stringify(meta) : null },
+  });
+}
+
+/**
+ * Uji koneksi Telegram: GET /bot{token}/getMe. Verifikasi MATERIAL respons
+ * (`ok === true` + `username`), bukan sekadar status HTTP. Token tidak pernah
+ * ikut dalam note (deskripsi error disaring `sanitizeProviderNote`).
+ */
+export async function testTelegramConnection(config: {
+  credentialEnc: string | null;
+}): Promise<TelegramTestResult> {
+  const token = resolveTelegramToken(config);
+  if (!token) return { ok: false, note: "Bot Token belum dikonfigurasi." };
+
+  try {
+    const res = await fetchWithTimeout(`https://api.telegram.org/bot${token}/getMe`, {
+      method: "GET",
+    });
+    const data = (await res.json().catch(() => null)) as {
+      ok?: boolean;
+      result?: { username?: string; first_name?: string };
+      description?: string;
+    } | null;
+
+    if (res.ok && data?.ok === true && data.result?.username) {
+      const name = data.result.first_name ? ` (${data.result.first_name})` : "";
+      return {
+        ok: true,
+        note: `Terhubung ke bot @${data.result.username}${name}.`,
+        username: data.result.username,
+      };
+    }
+    const desc = data?.description || `HTTP ${res.status}`;
+    // 401/Unauthorized: pesan ramah (kata "Unauthorized" = 12 alnum akan kena
+    // mask sanitizeProviderNote → "[rahasia]", membingungkan).
+    if (res.status === 401 || desc === "Unauthorized") {
+      return {
+        ok: false,
+        note: "Bot Token ditolak Telegram (Unauthorized). Periksa token dari BotFather.",
+      };
+    }
+    return { ok: false, note: sanitizeProviderNote(`Telegram API: ${desc}`) };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, note: sanitizeProviderNote(`Gagal menghubungi Telegram: ${msg}`) };
+  }
+}
+
+/**
+ * Pastikan baris konfigurasi TELEGRAM global ada — dipanggil saat panel dibuka
+ * (GET). Bila belum pernah dikonfigurasi, baris dibuat dari DATA LAMA:
+ * - Bot Token env `TELEGRAM_BOT_TOKEN` disalin terenkripsi (bila ada);
+ * - Chat ID diambil dari profil admin yang sudah menautkan Telegram;
+ * - `isActive` hanya true bila token tersedia (mempertahankan keadaan
+ *   notifikasi yang selama ini berjalan via env).
+ * Murni baca/simpan — TIDAK PERNAH mengirim pesan.
+ */
+export async function ensureTelegramConfig() {
+  const existing = await prisma.integrationConfig.findUnique({
+    where: { service_scope: { service: "TELEGRAM", scope: "" } },
+  });
+  if (existing) return existing;
+
+  const envToken = process.env.TELEGRAM_BOT_TOKEN?.trim() || null;
+  const admin = await prisma.user.findFirst({
+    where: { role: "ADMIN", telegramChatId: { not: null } },
+    select: { telegramChatId: true },
+    orderBy: { createdAt: "asc" },
+  });
+  const chatId = admin?.telegramChatId?.trim() || "";
+
+  return prisma.integrationConfig.create({
+    data: {
+      service: "TELEGRAM",
+      scope: "",
+      provider: "telegram-bot",
+      endpoint: null,
+      credentialEnc: envToken ? encryptSecret(envToken) : null,
+      credentialHint: envToken ? maskSecret(envToken) : null,
+      model: null,
+      meta: chatId ? JSON.stringify({ chatId }) : null,
+      // Token tersedia → notifikasi selama ini memang berjalan via env; tanpa
+      // token, konfigurasi dianggap "belum dikonfigurasi" (nonaktif).
+      isActive: Boolean(envToken),
+    },
+  });
+}
+
+/** Muat config + uji koneksi Telegram (getMe) + catat hasilnya. */
+export async function runTelegramTest(scope: IntegrationScope): Promise<TelegramTestResult> {
+  const row = await getRawConfig("TELEGRAM", scope);
+  if (!row) return { ok: false, note: "Konfigurasi belum disimpan." };
+  const result = await testTelegramConnection(row);
+  await recordTestResult("TELEGRAM", scope, { ok: result.ok, note: result.note });
+  if (result.ok && result.username) {
+    await recordTelegramMeta(scope, { botUsername: result.username });
+  }
+  return result;
+}
+
+/**
+ * Kirim SATU pesan uji via Telegram ke Chat ID tersimpan (meta.chatId) —
+ * hanya atas aksi eksplisit pengguna (tombol "Kirim Pesan Uji"). Konfigurasi
+ * wajib aktif; token diambil dari DB (fallback env).
+ */
+export async function sendTelegramTestMessage(
+  scope: IntegrationScope,
+  text: string,
+): Promise<IntegrationTestResult> {
+  const row = await getRawConfig("TELEGRAM", scope);
+  if (!row) return { ok: false, note: "Konfigurasi belum disimpan." };
+  if (!row.isActive) {
+    return { ok: false, note: "Konfigurasi belum diaktifkan. Aktifkan dulu sebelum mengirim." };
+  }
+
+  let meta: Record<string, string> = {};
+  try {
+    meta = row.meta ? (JSON.parse(row.meta) as Record<string, string>) : {};
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) meta = {};
+  } catch {
+    meta = {};
+  }
+  const chatId = typeof meta.chatId === "string" ? meta.chatId.trim() : "";
+  if (!chatId || !isValidChatId(chatId)) {
+    return { ok: false, note: "Chat ID tujuan belum diisi atau tidak valid — simpan Chat ID dulu." };
+  }
+
+  const token = resolveTelegramToken(row);
+  if (!token) return { ok: false, note: "Bot Token belum dikonfigurasi." };
+
+  const r = await sendTelegramMessage(chatId, text, { token });
+  const result: IntegrationTestResult = r.ok
+    ? { ok: true, note: `Pesan uji terkirim ke chat ${chatId} (message_id=${r.messageId ?? "?"}).` }
+    : { ok: false, note: sanitizeProviderNote(r.error ?? "Telegram tidak mengonfirmasi pengiriman.") };
+  await recordTestResult("TELEGRAM", scope, result);
+  if (r.ok) await recordTelegramMeta(scope, { lastSentAt: new Date().toISOString() });
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Resolusi scope & otorisasi (dipakai route)
 // ---------------------------------------------------------------------------
 
@@ -579,9 +774,15 @@ export async function sendWhatsAppTestMessage(
 export function scopeForUser(user: SafeUser, service: IntegrationService): IntegrationScope {
   if (user.role === "ADMIN") return "";
   if (user.role === "SELLER") {
-    // SELLER hanya boleh mengelola WhatsApp miliknya sendiri, bukan AI global.
+    // SELLER hanya boleh mengelola WhatsApp miliknya sendiri — bukan AI global
+    // maupun Telegram (notifikasi bot = kewenangan Administrator).
     if (service === "AI_PROVIDER") {
       throw Object.assign(new Error("Hanya admin yang dapat mengelola API Key AI."), {
+        code: "FORBIDDEN",
+      });
+    }
+    if (service === "TELEGRAM") {
+      throw Object.assign(new Error("Hanya admin yang dapat mengatur notifikasi Telegram."), {
         code: "FORBIDDEN",
       });
     }

@@ -6,6 +6,7 @@ import { useToast } from "@/components/ui/Toast";
 import { formatDateId } from "@/lib/format";
 import { WhatsAppSettingsPanel } from "@/components/settings/WhatsAppSettingsPanel";
 import { WhatsAppPreferencesPanel } from "@/components/settings/WhatsAppPreferencesPanel";
+import { TelegramSettingsPanel } from "@/components/settings/TelegramSettingsPanel";
 import { ApiKeySettingsPanel } from "@/components/settings/ApiKeySettingsPanel";
 import { IntegrationStatusPanel } from "@/components/settings/IntegrationStatusPanel";
 
@@ -330,6 +331,7 @@ export default function AdminProfilePage() {
       >
         <WhatsAppPreferencesPanel />
         <WhatsAppSettingsPanel showOps />
+        <TelegramSettingsPanel />
         <ApiKeySettingsPanel />
       </div>
       <div style={{ marginTop: "1.5rem" }}>

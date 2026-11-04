@@ -28,6 +28,7 @@ vi.mock("./auth", () => ({
 
 import { prisma } from "@/lib/prisma";
 import {
+  TELEGRAM_PROVIDERS,
   WHATSAPP_PROVIDERS,
   isValidHttpUrl,
   isValidIndonesiaMobile,
@@ -38,7 +39,9 @@ import {
   scopeForUser,
   setIntegrationActive,
   testAiConnection,
+  testTelegramConnection,
   testWhatsAppConnection,
+  toSafeConfig,
 } from "@/lib/integrations";
 import { encryptSecret } from "@/lib/secret-store";
 import type { SafeUser } from "@/lib/auth";
@@ -160,6 +163,12 @@ describe("scopeForUser — otorisasi role", () => {
 
   it("SELLER → DITOLAK untuk API Key AI (global)", () => {
     expect(() => scopeForUser(user("SELLER"), "AI_PROVIDER")).toThrow(/admin/i);
+  });
+
+  it("ADMIN → scope global untuk TELEGRAM; SELLER/BUYER DITOLAK (khusus admin)", () => {
+    expect(scopeForUser(user("ADMIN"), "TELEGRAM")).toBe("");
+    expect(() => scopeForUser(user("SELLER", "seller-1"), "TELEGRAM")).toThrow(/admin/i);
+    expect(() => scopeForUser(user("BUYER"), "TELEGRAM")).toThrow(/akses/i);
   });
 
   it("BUYER → DITOLAK untuk semua layanan integrasi", () => {
@@ -461,6 +470,101 @@ describe("testWhatsAppConnection — uji koneksi Fonnte (bukan sekadar HTTP 200)
     const r = await testWhatsAppConnection({ ...base, credentialEnc: null });
     expect(r.ok).toBe(false);
     expect(r.note).toContain("API token");
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Telegram — panel Pengaturan Telegram (khusus ADMIN, provider independen)
+// ---------------------------------------------------------------------------
+
+describe("Telegram — provider & tampilan konfigurasi aman", () => {
+  it("hanya provider telegram-bot yang didukung", () => {
+    expect(Object.keys(TELEGRAM_PROVIDERS)).toEqual(["telegram-bot"]);
+    expect(TELEGRAM_PROVIDERS["telegram-bot"].label).toBe("Telegram Bot API");
+  });
+
+  it("toSafeConfig: label benar, meta non-rahasia tampil, TANPA field token", () => {
+    const now = new Date();
+    const safe = toSafeConfig({
+      id: "cfg-tg",
+      service: "TELEGRAM",
+      provider: "telegram-bot",
+      endpoint: null,
+      model: null,
+      meta: JSON.stringify({ chatId: "123456789", botUsername: "mendungtirta_bot" }),
+      credentialEnc: encryptSecret("123456789:AA-super-secret-token-abcdefgh"),
+      credentialHint: "1234…cdefgh",
+      isActive: true,
+      lastTestAt: now,
+      lastTestOk: true,
+      lastTestNote: "Terhubung ke bot.",
+      createdAt: now,
+      updatedAt: now,
+    } as Parameters<typeof toSafeConfig>[0]);
+
+    expect(safe.providerLabel).toBe("Telegram Bot API");
+    expect(safe.meta?.chatId).toBe("123456789");
+    expect(safe.hasCredential).toBe(true);
+    const serialized = JSON.stringify(safe);
+    expect(serialized).not.toContain("super-secret-token"); // token tak pernah bocor
+    expect(serialized).not.toContain("credentialEnc");
+  });
+});
+
+describe("testTelegramConnection — getMe (verifikasi material, tanpa kebocoran token)", () => {
+  const enc = encryptSecret("123456789:AA-test-token-abcdefghijklmnop");
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("getMe ok=true + username → sukses + username bot", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ok: true,
+              result: { id: 1, is_bot: true, username: "mendungtirta_bot", first_name: "Mendung" },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+      ),
+    );
+    const r = await testTelegramConnection({ credentialEnc: enc });
+    expect(r.ok).toBe(true);
+    expect(r.username).toBe("mendungtirta_bot");
+    expect(r.note).toContain("@mendungtirta_bot");
+  });
+
+  it("token salah → gagal jujur (Unauthorized), token TIDAK pernah masuk note", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ok: false, error_code: 401, description: "Unauthorized" }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+    const r = await testTelegramConnection({ credentialEnc: enc });
+    expect(r.ok).toBe(false);
+    expect(r.note).toContain("Unauthorized");
+    expect(r.note).not.toContain("123456789");
+    expect(r.note).not.toContain("AA-test-token");
+  });
+
+  it("tanpa token (DB kosong & env kosong) → jujur, tanpa panggilan jaringan", async () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "");
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const r = await testTelegramConnection({ credentialEnc: null });
+    expect(r.ok).toBe(false);
+    expect(r.note).toContain("Bot Token");
     expect(spy).not.toHaveBeenCalled();
   });
 });

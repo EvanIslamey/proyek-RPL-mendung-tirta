@@ -61,6 +61,7 @@ enum EmailStatus {
 enum IntegrationService {
   WHATSAPP // notifikasi WhatsApp via Fonnte WhatsApp Gateway (migrasi dari Meta Cloud API)
   AI_PROVIDER // API Key provider AI chatbot (OpenAI-compatible / NVIDIA NIM / ds.)
+  TELEGRAM // Bot Token & Chat ID notifikasi Telegram (panel Pengaturan Telegram admin)
 }
 
 // MODELS

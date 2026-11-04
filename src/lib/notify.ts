@@ -114,6 +114,31 @@ export function telegramSendOnce(attemptsBefore: number): boolean {
   return attemptsBefore === 0;
 }
 
+/**
+ * Gerbang kanal Telegram dari panel Pengaturan Telegram (service TELEGRAM,
+ * scope global) — fungsi murni, mudah diuji tanpa DB:
+ * - `null` (baris konfigurasi belum pernah ada / panel belum dibuka) →
+ *   perilaku LAMA: notifikasi Telegram tetap dikirim via env;
+ * - selain itu → ikuti `isActive` (tombol Aktifkan/Nonaktifkan di panel).
+ * Toggle Telegram HANYA memengaruhi kanal Telegram — Fonnte/WA tidak tersentuh.
+ */
+export function telegramGateAllows(isActive: boolean | null | undefined): boolean {
+  return isActive === null || isActive === undefined ? true : isActive;
+}
+
+/** Baca gerbang Telegram dari DB. DB error → jangan mematikan kanal lama. */
+export async function isTelegramChannelEnabled(): Promise<boolean> {
+  try {
+    const row = await prisma.integrationConfig.findUnique({
+      where: { service_scope: { service: "TELEGRAM", scope: "" } },
+      select: { isActive: true },
+    });
+    return telegramGateAllows(row?.isActive ?? null);
+  } catch {
+    return true;
+  }
+}
+
 function isUniqueViolation(e: unknown): boolean {
   return (
     typeof e === "object" && e !== null && "code" in e &&
@@ -322,11 +347,14 @@ async function alertAdminsEmailFailed(failed: NotificationRow, error: string): P
     }
   }
 
-  // Kirim Telegram ke admin (non-blocking)
-  await sendTelegramToAdmins(
-    "⚠️ Email Notifikasi Gagal",
-    `Email notifikasi (${failed.kind}) ke ${masked} gagal setelah ${EMAIL_MAX_ATTEMPTS} percobaan.\nDetail: ${error}`,
-  ).catch(() => undefined);
+  // Kirim Telegram ke admin (non-blocking) — dihormati gerbang panel Pengaturan
+  // Telegram; gagal Telegram TIDAK PERNAH menggagalkan apapun.
+  if (await isTelegramChannelEnabled()) {
+    await sendTelegramToAdmins(
+      "⚠️ Email Notifikasi Gagal",
+      `Email notifikasi (${failed.kind}) ke ${masked} gagal setelah ${EMAIL_MAX_ATTEMPTS} percobaan.\nDetail: ${error}`,
+    ).catch(() => undefined);
+  }
 }
 
 /** Kirim satu baris (sudah diklaim) → perbarui status SENT/FAILED. */
@@ -387,6 +415,9 @@ export async function dispatchEmails(ids: string[]): Promise<void> {
   // mengunci dengan email) dan ikut diselesaikan agar pemanggil yang menunggu
   // (uji/e2e) melihat hasil kedua kanal.
   const waDone = dispatchWhatsApp(unique);
+  // Gerbang panel Pengaturan Telegram dibaca sekali per dispatch; tanpa baris
+  // konfigurasi → perilaku lama (kirim via env). Fonnte tidak terpengaruh.
+  const telegramOn = await isTelegramChannelEnabled();
   try {
     for (const id of unique) {
       const row = await claim(id);
@@ -396,7 +427,7 @@ export async function dispatchEmails(ids: string[]): Promise<void> {
       const firstAttempt = telegramSendOnce(row.emailAttempts);
       await sendOne(row);
       // Kirim Telegram secara terpisah (gagal tidak block email)
-      if (firstAttempt) {
+      if (firstAttempt && telegramOn) {
         await sendTelegramNotification(row.user.id, row.title, row.body, row.link ?? undefined).catch((e) => {
           console.error(`[telegram] GAGAL id=${row.id}:`, sanitizeEmailError(e));
         });

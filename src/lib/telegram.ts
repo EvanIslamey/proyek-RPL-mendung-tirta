@@ -21,9 +21,10 @@ function getBotToken(): string {
   return token;
 }
 
-/** Dapatkan URL lengkap endpoint Telegram API. */
-function telegramApi(method: string): string {
-  return `${TELEGRAM_API_BASE}${getBotToken()}/${method}`;
+/** Dapatkan URL lengkap endpoint Telegram API.
+ * `tokenOverride` hanya dipakai backend (uji kirim dengan token tersimpan di DB). */
+function telegramApi(method: string, tokenOverride?: string): string {
+  return `${TELEGRAM_API_BASE}${tokenOverride?.trim() || getBotToken()}/${method}`;
 }
 
 /** Validasi format chat ID (angka negatif untuk group/channel, positif untuk user). */
@@ -50,6 +51,8 @@ export async function hashLinkToken(token: string): Promise<string> {
 export async function sendTelegramMessage(chatId: string, text: string, options?: {
   parseMode?: "HTML" | "MarkdownV2";
   disableWebPagePreview?: boolean;
+  /** Token override (backend-only) — default: env TELEGRAM_BOT_TOKEN. */
+  token?: string;
 }): Promise<{ ok: boolean; messageId?: number; error?: string }> {
   try {
     const body: Record<string, unknown> = {
@@ -59,7 +62,7 @@ export async function sendTelegramMessage(chatId: string, text: string, options?
     };
     if (options?.parseMode) body.parse_mode = options.parseMode;
 
-    const res = await fetch(telegramApi("sendMessage"), {
+    const res = await fetch(telegramApi("sendMessage", options?.token), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

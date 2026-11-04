@@ -1,4 +1,4 @@
-# Fitur Pengaturan Integrasi: WhatsApp (Fonnte) & API Key AI
+# Fitur Pengaturan Integrasi: WhatsApp (Fonnte), Telegram & API Key AI
 
 Ditambahkan ke halaman **Informasi Diri** yang sudah ada (tanpa menu navbar baru,
 tanpa halaman baru), dan terhubung sungguhan ke backend chatbot **dan pipeline
@@ -9,6 +9,11 @@ notifikasi per-role**.
 > (`https://api.fonnte.com`). Field *Phone Number ID* & *Access Token Meta*
 > tidak lagi ada; integrasi lama ditolak backend.
 
+> **Panel Pengaturan Telegram (Nov 2026):** kartu Telegram berdekatan dengan
+> panel Fonnte di Informasi Diri Administrator — Bot Token terenkripsi + Chat ID
+> + uji koneksi getMe + kirim pesan uji + aktif/nonaktif, **independen** dari
+> WhatsApp/Fonnte (lihat bagian 13).
+
 ## 1. Ringkasan UI
 
 | Bagian | Halaman | Akses |
@@ -17,6 +22,7 @@ notifikasi per-role**.
 | **Pengaturan WhatsApp (Fonnte)** | `/seller/profile`, `/admin/profile` | SELLER (miliknya), ADMIN (global) |
 | **Preferensi Notifikasi WhatsApp** (baru) | `/admin/profile`, `/seller/profile`, `/buyer` | semua role (nomor + persetujuan pribadi) |
 | **Pengaturan API Key** | `/admin/profile` | hanya ADMIN |
+| **Pengaturan Telegram** (baru) | `/admin/profile` | hanya ADMIN (global) |
 | **Status Koneksi & Riwayat Pengujian** | `/seller/profile`, `/admin/profile` | baris API Key disembunyikan untuk SELLER |
 
 - Panel Pengaturan WhatsApp memuat: **Provider** (Fonnte), **API Token** (input
@@ -105,6 +111,10 @@ GET/PUT/DELETE /api/settings/api-key         # hanya ADMIN
 POST       /api/settings/api-key/test        # uji koneksi
 POST       /api/settings/api-key/toggle      # aktifkan/nonaktifkan (guard validasi)
 GET/PATCH  /api/profile                      # field phone & whatsappNotify (preferensi WA per user)
+GET/PUT    /api/settings/telegram            # baca/simpan — hanya ADMIN (GET = ensure-on-read, tanpa kirim)
+POST       /api/settings/telegram/test       # UJI KONESI bot (getMe, verifikasi material ok+username)
+PUT        /api/settings/telegram/test       # kirim pesan uji ke Chat ID tersimpan (tombol eksplisit)
+POST       /api/settings/telegram/toggle     # aktifkan/nonaktifkan (guard: wajib lolos uji koneksi)
 ```
 
 Semua: wajib login + `assertSameOrigin` (mutasi) + rate limit + sanitasi error
@@ -116,9 +126,13 @@ tanpa kredensial.
 |---|---|---|
 | `SECRET_ENCRYPTION_KEY` | wajib agar credential tersimpan | kunci AES-256-GCM credential integrasi (di `.env` lokal, gitignored) |
 | `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL`, `AI_TIMEOUT_MS` | sudah ada | fallback chatbot bila tidak ada konfigurasi DB aktif |
+| `TELEGRAM_BOT_TOKEN` | sudah ada (legacy) | fallback token bila panel belum menyimpan token sendiri; pada pembukaan pertama panel, nilai ini disalin terenkripsi ke DB (migrasi data lama) |
+| `TELEGRAM_WEBHOOK_SECRET` | sudah ada | webhook linking Telegram (tidak disentuh fitur panel) |
 
 Tidak ada env baru untuk Fonnte — token disimpan terenkripsi di DB
 (`IntegrationConfig.credentialEnc`, scope global), diisi lewat form.
+Telegram sama: **tidak ada env baru wajib** — token diisi lewat panel dan
+disimpan terenkripsi; env `TELEGRAM_BOT_TOKEN` hanya sumber migrasi/fallback.
 
 ## 7. Notifikasi WhatsApp per role (kanal AKTIF di pipeline)
 
@@ -185,14 +199,15 @@ Telegram, **WhatsApp/Fonnte**) tanpa menduplikasi sistem notifikasi — baris
 
 | Lapisan | Hasil |
 |---|---|
-| Unit test (vitest) | **243/243 lulus** (11 file) — termasuk 19 test baru `fonnte.test.ts` (fonnteTarget, pembacaan `status`/`Status`, /device, /send FormData + Authorization tanpa Bearer, hideSecret/clip, timeout, tidak melempar) + test notify (helper WA: `isIndonesiaMobile`/`isE164`/`parseOpsTargets`/`maskPhone`/`buildWaMessage`/retry) + test integrations (shape registry provider, validasi nomor,5 kasus `testWhatsAppConnection` — sukses nyata, `status:false`, device disconnect, provider Meta lama ditolak tanpa fetch, token kosong) |
-| Smoke Fonnte (`scripts/smoke-fonnte.mts`) | **47/47 PASS** — mock server Fonnte lokal dengan4 model token: simpan token (terenkripsi, tak bocor), uji koneksi sukses + snapshot perangkat, FormData `countryCode=0` tanpa Bearer, nomor non-E.164 ditolak tanpa request keluar, token salah → `token invalid`, perangkat disconnect → meta `deviceStatus=disconnect`, kuota habis (`Status` huruf besar) → kirim gagal jujur, endpoint mati → "Gagal menghubungi Fonnte", guard Aktifkan; notifikasi per role via pipeline asli (BUYER/SELLER tanpa persetujuan → SKIPPED; setelah opt-in → SENT; ADMIN tepat satu pesan per kejadian ke ops pair; total pengiriman persis6 — tanpa pesan ganda/massal); kegagalan WA (kuota/token salah) **tidak menggagalkan order** (201, bayar, batal tetap sukses; `waStatus=FAILED` beralasan); snapshot/restore penuh (order uji dihapus, phone/stok/profil dipulihkan, config AI utuh) |
+| Unit test (vitest) | **251/251 lulus** (11 file) — termasuk 19 test baru `fonnte.test.ts` (fonnteTarget, pembacaan `status`/`Status`, /device, /send FormData + Authorization tanpa Bearer, hideSecret/clip, timeout, tidak melempar) + test notify (helper WA: `isIndonesiaMobile`/`isE164`/`parseOpsTargets`/`maskPhone`/`buildWaMessage`/retry) + test integrations (shape registry provider, validasi nomor,5 kasus `testWhatsAppConnection` — sukses nyata, `status:false`, device disconnect, provider Meta lama ditolak tanpa fetch, token kosong) + **8 test Telegram baru** (scope `TELEGRAM`: ADMIN global, SELLER/BUYER ditolak; registry `telegram-bot`; `toSafeConfig` label + meta non-rahasia tanpa field token; `testTelegramConnection` getMe sukses/`Unauthorized`/tanpa token — token tak pernah masuk note; `telegramGateAllows` gerbang notifikasi) |
+| Smoke Fonnte (`scripts/smoke-fonnte.mts`) | **47/47 PASS** — mock server Fonnte lokal dengan4 model token: simpan token (terenkripsi, tak bocor), uji koneksi sukses + snapshot perangkat, FormData `countryCode=0` tanpa Bearer, nomor non-E.164 ditolak tanpa request keluar, token salah → `token invalid`, perangkat disconnect → meta `deviceStatus=disconnect`, kuota habis (`Status` huruf besar) → kirim gagal jujur, endpoint mati → "Gagal menghubungi Fonnte", guard Aktifkan; notifikasi per role via pipeline asli (BUYER/SELLER tanpa persetujuan → SKIPPED; setelah opt-in → SENT; ADMIN tepat satu pesan per kejadian ke ops pair; total pengiriman persis6 — tanpa pesan ganda/massal); kegagalan WA (kuota/token salah) **tidak menggagalkan order** (201, bayar, batal tetap sukses; `waStatus=FAILED` beralasan); snapshot/restore penuh (order uji dihapus, phone/stok/profil dipulihkan, config AI utuh) — **fix Nov 2026: baris WA asli kini di-snapshot & dipulihkan** (sebelumnya `deleteMany` baris WA tanpa restorasi), 47/47 PASS ×3 run |
 | Smoke integrasi live (`scripts/smoke-integrations.mts`) | **66/66 PASS** — otorisasi 3 role; simpan Fonnte; `phoneId`/`device*`/`opsTargets` spoof DIBERSIHKAN backend (scope seller di-strip); validasi E.164 (testTarget/senderNumber/opsTargets); uji koneksi WA ke Fonnte sungguhan → ditolak jujur dengan token uji (bukan sukses palsu); kirim uji nonaktif & fallback `to`; provider Meta lama ditolak 400; guard toggle; preferensi profil (`+62`, opt-in tanpa nomor ditolak, hapus nomor → opt-in nonaktif); regresi API key & profil utuh; **snapshot/restore: config AI NVIDIA aktif dipulihkan di akhir run** |
 | Verifikasi E2E chatbot (`scripts/verify-db-ai-config.mts`) | **9/9 PASS** — konfigurasi DB aktif dipakai chatbot (jawaban mock provider, credential terdekripsi dari DB, nonaktifkan → kembali ke env, data uji dibersihkan) |
 | Uji chatbot live (`scripts/test-chatbot-live.mts`) | **2/2 BERHASIL** — `source=ai` dengan config aktif di DB (`resolveAiRuntime → source=db`), latensi 6,6 dtk & 5,8 dtk; pertanyaan akun dijawab **data asli dari DB** tanpa mengarang |
 | Verifikasi NVIDIA (`scripts/verify-nvidia.mts`) | **LOLOS** — `GET /models` 200 (85 model) + `POST /chat/completions` **200 dengan balasan nyata** (key tidak pernah dicetak) |
 | Setup config via API (`scripts/setup-ai-config.mts`) | **LOLOS** — simpan (hint `nva••••••••bUdd`, key mentah tidak ada di respons) → uji (`ok=true`, 85 model) → aktifkan (guard lolos uji) → baca ulang persisten |
-| UI live (browser) | `/admin/profile`: panel "Pengaturan WhatsApp" menampilkan **Provider: Fonnte WhatsApp Gateway**, API Token, nomor pengirim/tujuan/ops, Status perangkat, Petunjuk Fonnte, **5 tombol** (Simpan/Uji Koneksi/Kirim Pesan Uji/Aktifkan/Nonaktifkan); **tidak ada** lagi teks *Phone Number ID*/*Access Token*/*meta-whatsapp-cloud*; panel API Key AI & Status Koneksi utuh; panel **Preferensi Notifikasi WhatsApp** tampil; DOM **tanpa token mentah**; `/buyer`: hanya preferensi notifikasi (tanpa panel integrasi) |
+| API Telegram live (curl, sesi Nov 2026) | GET → baris dibuat via ensure-on-read (env `TELEGRAM_BOT_TOKEN` tersalin terenkripsi, hint `890••••••••ZAj8`, `isActive=true`, **tanpa token di respons**) → POST test getMe **`ok=true` `@MendungTirtaNotifBot`** → simpan Chat ID invalid → 400 field error; simpan valid → meta **merge** (`botUsername` terjaga) → toggle OFF/ON **WhatsApp tetap `isActive=true`** (independensi) → kirim pesan uji ke Chat ID dummy → respons **asli** Telegram `Bad Request: chat not found` (jalur kirim terbukti pakai token tersimpan; `lastSentAt` hanya tercatat saat sukses) → hapus Chat ID → meta bersih |
+| UI live (browser) | `/admin/profile`: panel "Pengaturan WhatsApp" menampilkan **Provider: Fonnte WhatsApp Gateway**, API Token, nomor pengirim/tujuan/ops, Status perangkat, Petunjuk Fonnte, **5 tombol** (Simpan/Uji Koneksi/Kirim Pesan Uji/Aktifkan/Nonaktifkan); **tidak ada** lagi teks *Phone Number ID*/*Access Token*/*meta-whatsapp-cloud*; panel API Key AI & Status Koneksi utuh; panel **Preferensi Notifikasi WhatsApp** tampil; DOM **tanpa token mentah**; **panel "Pengaturan Telegram" tampil berdekatan** (badge "Aktif & teruji", Bot Token hint `890••••••••ZAj8`, Chat ID, 4 tombol, tanpa kebocoran token di DOM); `/buyer`: hanya preferensi notifikasi (tanpa panel integrasi) |
 | `npm run typecheck` / `lint` / `build` | **bersih** — typecheck 0 error; lint 0 error (2 warning lama di file yang tidak disentuh); build sukses dengan route `/api/settings/whatsapp`, `/whatsapp/test`, `/whatsapp/toggle`, `/api/profile` terdaftar |
 
 ## 10. Yang membutuhkan tindakan manual
@@ -210,6 +225,11 @@ Telegram, **WhatsApp/Fonnte**) tanpa menduplikasi sistem notifikasi — baris
    pengguna otomatis `SKIPPED` (tidak pernah diganggu).
 3. **Webhook masuk** — butuh endpoint publik/tunnel (bagian 8); localhost tidak
    diekspos tanpa persetujuan.
+4. **Chat ID Telegram** — bot belum pernah menerima pesan (tidak ada Chat ID
+   tersimpan di DB, `getUpdates` terkunci webhook linking). Untuk membuktikan
+   *pesan uji benar-benar diterima*: chat bot (mis. `@MendungTirtaNotifBot`) →
+   kirim pesan apa pun → ambil ID via `@userinfobot` → isi **Chat ID** di panel
+   → Simpan → Uji Koneksi → Aktifkan → **Kirim Pesan Uji**.
 
 ## 11. Daftar file
 
@@ -219,6 +239,13 @@ Telegram, **WhatsApp/Fonnte**) tanpa menduplikasi sistem notifikasi — baris
 - `src/app/api/settings/whatsapp/toggle/route.ts`
 - `src/components/settings/WhatsAppPreferencesPanel.tsx`
 - `scripts/smoke-fonnte.mts` (mock Fonnte lokal,47 cek)
+
+**Baru (Telegram):**
+- `src/app/api/settings/telegram/route.ts` (GET ensure-on-read + PUT simpan
+  token/chat ID, merge meta server-side)
+- `src/app/api/settings/telegram/test/route.ts` (POST getMe, PUT kirim pesan uji)
+- `src/app/api/settings/telegram/toggle/route.ts` (guard lolos uji)
+- `src/components/settings/TelegramSettingsPanel.tsx` (kartu panel admin)
 
 **Baru (sesi integrasi sebelumnya, tetap):**
 - `src/lib/secret-store.ts` + test; `src/lib/integrations.ts` + test
@@ -252,6 +279,14 @@ Telegram, **WhatsApp/Fonnte**) tanpa menduplikasi sistem notifikasi — baris
 - `.env` — `AI_MODEL` diganti `minimaxai/minimax-m3.1-flash` (lihat bagian 12)
 - `INTEGRATIONS-FEATURE.md` (dokumen ini)
 
+**Dimodifikasi (Telegram):**
+- `prisma/schema.prisma` — enum `IntegrationService` += `TELEGRAM` (`db push` aditif, tanpa tabel baru)
+- `src/lib/telegram.ts` — `telegramApi`/`sendTelegramMessage` menerima token override backend-only
+- `src/lib/integrations.ts` — registry `TELEGRAM_PROVIDERS`, cabang `toSafeConfig`, `scopeForUser` (SELLER ditolak), `resolveTelegramToken` (DB → fallback env), `testTelegramConnection` (getMe), `ensureTelegramConfig` (migrasi env + chat ID admin), `runTelegramTest`, `sendTelegramTestMessage`, `recordTelegramMeta`
+- `src/lib/notify.ts` — gerbang `telegramGateAllows`/`isTelegramChannelEnabled` di `dispatchEmails` & `alertAdminsEmailFailed` (tanpa baris config → perilaku lama)
+- `src/app/admin/profile/page.tsx` — sisip `<TelegramSettingsPanel />` setelah panel Fonnte
+- `scripts/smoke-fonnte.mts` — **fix**: snapshot & restorasi baris WA asli (bug restore lama menghapus konfigurasi asli permanen) + check "nyangkut SENDING" menunggu dispatch selesai (race)
+
 ## 12. Koneksi NVIDIA NIM (laporan A — tetap aktif)
 
 - **API key DITEMUKAN di konfigurasi lokal** (`AI_API_KEY` di `.env`, ter-gitignore,
@@ -274,3 +309,46 @@ Telegram, **WhatsApp/Fonnte**) tanpa menduplikasi sistem notifikasi — baris
 - **Hasil uji terakhir:** uji koneksi `ok=true`; chatbot live `source=ai`
   dengan jawaban provider nyata, termasuk grounding akun (nama + tanggal
   daftar persis dari database) tanpa mengarang.
+
+## 13. Pengaturan Telegram (panel admin, provider independen)
+
+**Penyebab "menu Telegram hilang" (hasil audit, Nov 2026):** menu/kartu
+"Pengaturan Telegram" **memang tidak pernah ada** — `git log -S "Pengaturan
+Telegram"` / `"TELEGRAM_CHAT_ID"` kosong dan tidak ada file terhapus. Yang ada
+hanya fitur *linking* Telegram per-user (`User.telegramChatId` via webhook +
+`/api/telegram/*`) dan pengiriman notifikasi memakai env `TELEGRAM_BOT_TOKEN`.
+`TELEGRAM_CHAT_ID` tidak pernah ada di HEAD (chat ID bersifat per-user).
+Panel ini adalah fitur BARU, bukan pemulihan komponen lama.
+
+**Arsitektur (tanpa tabel/endpoint duplikat):**
+- Enum `IntegrationService` += `TELEGRAM` → satu baris config global
+  (scope `""`) di tabel `IntegrationConfig` yang sama, kolom yang sama.
+- Endpoint baru hanya 3 jalur fungsional: `/api/settings/telegram`
+  (GET/PUT), `/telegram/test` (POST getMe / PUT kirim uji),
+  `/telegram/toggle` (POST). Linking/unlink/preferensi/webhook lama
+  (`/api/telegram/*`) tetap — beda fungsi, tidak diduplikasi.
+- **Ensure-on-read:** GET membuat baris bila belum ada — menyalin token env
+  `TELEGRAM_BOT_TOKEN` ke `credentialEnc` terenkripsi (**migrasi data lama**),
+  Chat ID dari admin yang sudah link, `isActive = Boolean(token env)`
+  (mempertahankan keadaan notifikasi lama). Murni baca/simpan, tanpa kirim.
+- **Token:** `resolveTelegramToken` = decrypt DB → fallback env → null.
+  Tidak pernah tampil utuh (hanya hint `maskSecret`), tidak pernah di log,
+  tidak pernah di respons/frontend; error disaring `sanitizeProviderNote`
+  (kata `Unauthorized`/deskripsi 40+ karakter → dipetakan ke pesan ramah).
+- **Gerbang notifikasi (`notify.ts`):** `telegramGateAllows(null) = true`
+  (baris belum ada = perilaku lama, panel belum dibuka) — diterapkan di
+  `dispatchEmails` & `alertAdminsEmailFailed`. Baris ada → ikuti `isActive`.
+  DB error → tetap kirim (jangan mematikan kanal lama). Kegagalan Telegram
+  tidak pernah memengaruhi Fonnte/WA/email, dan sebaliknya.
+- **Guard & rate limit:** aktifkan hanya bila uji getMe terakhir lolos
+  (backend, tak bisa dipalsukan); uji 10/menit & kirim uji 5/menit per user;
+  kirim uji hanya via tombol + config aktif + Chat ID valid (`/^-?\d+$/`).
+- `lastSentAt` & `botUsername` disimpan di `meta` **server-side** (di-strip
+  dari input client, dipertahankan saat simpan lewat merge) — sumber "waktu
+  pengiriman terakhir" di panel.
+
+**Status pengujian live:** getMe sukses `@MendungTirtaNotifBot`; jalur kirim
+terbukti memanggil API Telegram asli (respons `chat not found` untuk ID dummy);
+toggle Telegram OFF/ON tidak mengubah status Fonnte. **Langkah manual tersisa:**
+isi Chat ID asli (bagian 10 poin 4) lalu tekan *Kirim Pesan Uji* untuk
+membuktikan pesan diterima di aplikasi Telegram.
