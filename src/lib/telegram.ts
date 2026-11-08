@@ -9,6 +9,7 @@
  * - Token & chat ID HANYA di backend, tidak pernah ke frontend
  */
 
+import { timingSafeEqual } from "node:crypto";
 import { prisma } from "./prisma";
 import { sanitizeEmailError } from "./notify";
 
@@ -119,10 +120,17 @@ export async function deleteTelegramWebhook(): Promise<{ ok: boolean; error?: st
   }
 }
 
-/** Verifikasi secret token webhook (header X-Telegram-Bot-Api-Secret-Token). */
+/**
+ * Verifikasi secret token webhook (header X-Telegram-BotApi-Secret-Token).
+ * Perbandingan constant-time (timingSafeEqual) agar tidak rentan serangan
+ * timing — panjang berbeda langsung ditolak tanpa perbandingan byte.
+ */
 export function verifyWebhookSecret(request: Request, expectedSecret: string): boolean {
-  const header = request.headers.get("x-telegram-bot-api-secret-token");
-  return header === expectedSecret;
+  const header = request.headers.get("x-telegram-bot-api-secret-token") ?? "";
+  const a = Buffer.from(header);
+  const b = Buffer.from(expectedSecret);
+  if (a.length === 0 || a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 /** Proses update webhook (linking akun via /start <token>). */

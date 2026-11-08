@@ -268,18 +268,22 @@ async function main() {
       if (dirtyHistory.status === 429) skip("History rusak difilter -> 200", "kena rate limit");
       else check("History rusak difilter -> 200", dirtyHistory.status === 200, `status ${dirtyHistory.status}`);
 
-      // Rate limit AI: kirim sampai 429 muncul (bucket user baru, harus andal).
+      // Rate limit AI: kirim sampai 429 muncul. Pakai pesan KOSONG (400 cepat,
+      // tetap dihitung limiter — limit dijalankan SEBELUM validasi) supaya
+      // deterministik dan tidak bergantung pada latensi provider AI (bisa
+      // timeout 90 dtk → jendela 60 dtk tidak pernah menumpuk).
+      // Limit 10/60 dtk → 429 paling lambat pada kirim ke-11 dalam jendela.
       let got429 = false;
       let sends = 0;
-      for (; sends < 8 && !got429; sends++) {
+      for (; sends < 12 && !got429; sends++) {
         const r = await api("/api/ai/chat", {
           method: "POST",
           cookie: cookieA,
-          body: { message: `tes ${sends}` },
+          body: { message: "" },
         });
         if (r.status === 429) got429 = true;
       }
-      check("Rate limit AI aktif (429 dalam <=8 kirim)", got429, `terkirim ${sends}x tanpa 429`);
+      check("Rate limit AI aktif (429 dalam <=12 kirim)", got429, `terkirim ${sends}x tanpa 429`);
     }
   }
 

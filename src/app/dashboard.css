@@ -269,7 +269,10 @@
 /* Form */
 .dash-form-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* minmax(0, …) — bukan 1fr polos: auto-min memakai min-content anak,
+     dan select dengan opsi panjang ("OpenAI-compatible (…)") dulu membuat
+     track melebihi container → overflow horizontal (regresi admin/profile). */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 1rem;
 }
 
@@ -280,6 +283,8 @@
   font-size: 0.85rem;
   font-weight: 600;
   color: var(--text-muted);
+  /* Sama seperti di atas: biarkan field menyusut mengikuti track. */
+  min-width: 0;
 }
 
 .dash-form-field.full {
@@ -388,6 +393,6 @@
   }
 
   .dash-form-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }

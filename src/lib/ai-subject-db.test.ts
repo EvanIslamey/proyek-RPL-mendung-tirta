@@ -136,4 +136,28 @@ describe("searchCatalog — AND subjek + harga dalam SATU WHERE (regresi precede
     await searchCatalog([], {});
     expect(vi.mocked(prisma.$queryRaw)).not.toHaveBeenCalled();
   });
+
+  it("keyword tak cocok TANPA filter → tidak pencarian longgar (jawaban jujur: kosong)", async () => {
+    // Tanpa guard, longgar akan membuang keyword dan mengembalikan produk
+    // acak — menyesatkan untuk pertanyaan yang memang tak ada produknya.
+    vi.mocked(prisma.$queryRaw).mockResolvedValueOnce([]);
+    const rows = await searchCatalog(["perahu nelayan"], {});
+    expect(rows).toEqual([]);
+    expect(vi.mocked(prisma.$queryRaw)).toHaveBeenCalledTimes(1);
+  });
+
+  it("keyword tak cocok DENGAN filter → longgar tetap jalan (jelajah terfilter)", async () => {
+    vi.mocked(prisma.$queryRaw)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "p1", name: "Umpan Minnow", price: 1000, stock: 4, image: null,
+          storeName: "Toko A", categoryName: "Umpan",
+          rating: 4, ratingCount: 2, status: "AVAILABLE",
+        },
+      ]);
+    const rows = await searchCatalog(["perahu"], { price: { max: 50000 } });
+    expect(vi.mocked(prisma.$queryRaw)).toHaveBeenCalledTimes(2);
+    expect(rows).toHaveLength(1);
+  });
 });

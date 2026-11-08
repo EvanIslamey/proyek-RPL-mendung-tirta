@@ -17,6 +17,9 @@ type Profile = {
   address: string | null;
   orderCount: number;
   createdAt: string;
+  telegramChatId: string | null;
+  telegramNotify: boolean;
+  telegramLinkedAt: string | null;
 };
 
 export default function SellerProfilePage() {
@@ -42,6 +45,15 @@ export default function SellerProfilePage() {
   const [savingPassword, setSavingPassword] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordFields, setPasswordFields] = useState<Record<string, string>>({});
+
+  // Telegram — panel notifikasi (dipindah dari Dashboard Penjual ke sini
+  // agar pengaturan akun terpusat di Informasi Diri).
+  const [telegramLoading, setTelegramLoading] = useState(false);
+  const [telegramError, setTelegramError] = useState<string | null>(null);
+  const [telegramSuccess, setTelegramSuccess] = useState<string | null>(null);
+  const [linkToken, setLinkToken] = useState<string | null>(null);
+  const [linkExpiresAt, setLinkExpiresAt] = useState<string | null>(null);
+  const [botUsername, setBotUsername] = useState<string | null>(null);
 
   const load = useCallback(() => {
     fetch("/api/profile", { cache: "no-store" })
@@ -71,6 +83,120 @@ export default function SellerProfilePage() {
   useEffect(() => {
     load();
   }, [load, reload]);
+
+  // Token linking hanya dibuat bila profil SUDAH termuat dan belum terhubung
+  // (mencegah pembuatan token baru tiap halaman dibuka untuk akun terhubung).
+  const loadTelegramLink = useCallback(async () => {
+    if (!profile) return;
+    if (profile.telegramChatId) return;
+    try {
+      const res = await fetch("/api/telegram/link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setLinkToken(data.token);
+        setLinkExpiresAt(data.expiresAt);
+        setBotUsername(data.botUsername);
+      }
+    } catch {
+      // ignore
+    }
+  }, [profile]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!cancelled) await loadTelegramLink();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadTelegramLink]);
+
+  // Telegram: buat token linking
+  async function onGenerateTelegramLink() {
+    if (telegramLoading) return;
+    setTelegramLoading(true);
+    setTelegramError(null);
+    setTelegramSuccess(null);
+    try {
+      const res = await fetch("/api/telegram/link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setTelegramError(data.message ?? "Gagal membuat token linking.");
+        return;
+      }
+      setLinkToken(data.token);
+      setLinkExpiresAt(data.expiresAt);
+      setBotUsername(data.botUsername);
+      setTelegramSuccess("Token linking dibuat. Ikuti instruksi di bawah.");
+    } catch {
+      setTelegramError("Tidak dapat terhubung ke server.");
+    } finally {
+      setTelegramLoading(false);
+    }
+  }
+
+  // Telegram: putuskan hubungan
+  async function onUnlinkTelegram() {
+    if (telegramLoading) return;
+    setTelegramLoading(true);
+    setTelegramError(null);
+    setTelegramSuccess(null);
+    try {
+      const res = await fetch("/api/telegram/unlink", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setTelegramError(data.message ?? "Gagal memutuskan hubungan Telegram.");
+        return;
+      }
+      setTelegramSuccess("Akun Telegram berhasil diputuskan.");
+      setProfile((p) =>
+        p ? { ...p, telegramChatId: null, telegramLinkedAt: null, telegramNotify: true } : null,
+      );
+      setLinkToken(null);
+      setLinkExpiresAt(null);
+      setBotUsername(null);
+    } catch {
+      setTelegramError("Tidak dapat terhubung ke server.");
+    } finally {
+      setTelegramLoading(false);
+    }
+  }
+
+  // Telegram: aktifkan/nonaktifkan notifikasi
+  async function onToggleTelegramNotify() {
+    if (!profile?.telegramChatId) return;
+    setTelegramLoading(true);
+    setTelegramError(null);
+    try {
+      const newNotify = !profile.telegramNotify;
+      const res = await fetch("/api/telegram/preferences", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ telegramNotify: newNotify }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setTelegramError(data.message ?? "Gagal mengubah preferensi.");
+        return;
+      }
+      setProfile((p) => (p ? { ...p, telegramNotify: newNotify } : null));
+      setTelegramSuccess(`Notifikasi Telegram ${newNotify ? "diaktifkan" : "dinonaktifkan"}.`);
+    } catch {
+      setTelegramError("Tidak dapat terhubung ke server.");
+    } finally {
+      setTelegramLoading(false);
+    }
+  }
 
   async function onSaveProfile(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -171,7 +297,7 @@ export default function SellerProfilePage() {
     <>
       <div className="dash-head">
         <div>
-          <h1>Profil Saya</h1>
+          <h1>Informasi Diri</h1>
           <p>
             {profile
               ? `Penjual sejak ${formatDateId(profile.createdAt)} • ${profile.orderCount} pesanan`
@@ -334,6 +460,112 @@ export default function SellerProfilePage() {
         <WhatsAppPreferencesPanel />
         <WhatsAppSettingsPanel />
         <IntegrationStatusPanel />
+
+        {/* Notifikasi Telegram (personal) — dipindah dari Dashboard Penjual. */}
+        <section className="dash-panel" style={{ marginBottom: 0 }}>
+          <h2>Notifikasi Telegram</h2>
+          {telegramError && (
+            <div className="form-error-banner" role="alert">
+              {telegramError}
+            </div>
+          )}
+          {telegramSuccess && (
+            <div className="form-success-banner" role="status">
+              {telegramSuccess}
+            </div>
+          )}
+          {profile?.telegramChatId ? (
+            <>
+              <div style={{ marginBottom: "1rem" }}>
+                <strong>Status:</strong> Terhubung
+                {profile.telegramLinkedAt && (
+                  <span style={{ marginLeft: "0.5rem", color: "var(--text-muted)", fontSize: "0.875rem" }}>
+                    Sejak {formatDateId(profile.telegramLinkedAt)}
+                  </span>
+                )}
+              </div>
+              <label
+                className="dash-form-field"
+                style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "1rem" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={profile.telegramNotify}
+                  onChange={onToggleTelegramNotify}
+                  disabled={telegramLoading}
+                />
+                <span>Terima notifikasi via Telegram</span>
+              </label>
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={onUnlinkTelegram}
+                disabled={telegramLoading}
+                style={{ marginTop: "0.5rem" }}
+              >
+                {telegramLoading ? "Memproses…" : "Putuskan Hubungan Telegram"}
+              </button>
+            </>
+          ) : (
+            <>
+              <p style={{ marginBottom: "1rem", color: "var(--text-muted)" }}>
+                Hubungkan akun Telegram untuk menerima notifikasi pesanan, pembayaran, dan
+                aktivitas penting secara real-time.
+              </p>
+              {linkToken ? (
+                <div style={{ marginBottom: "1rem" }}>
+                  <div style={{ marginBottom: "0.5rem" }}>
+                    <strong>Token Linking:</strong>
+                    <code
+                      style={{
+                        display: "block",
+                        marginTop: "0.25rem",
+                        padding: "0.5rem",
+                        background: "var(--bg-code)",
+                        borderRadius: "4px",
+                        wordBreak: "break-all",
+                        fontSize: "0.875rem",
+                      }}
+                    >
+                      {linkToken}
+                    </code>
+                  </div>
+                  <div style={{ fontSize: "0.875rem", color: "var(--text-muted)", marginBottom: "1rem" }}>
+                    <strong>Berlaku sampai:</strong> {linkExpiresAt ? formatDateId(linkExpiresAt) : "—"}{" "}
+                    &nbsp;|&nbsp; <strong>Bot:</strong> @{botUsername}
+                  </div>
+                  <ol style={{ paddingLeft: "1.25rem", fontSize: "0.875rem", lineHeight: "1.8" }}>
+                    <li>
+                      Buka Telegram dan cari <strong>@{botUsername}</strong>
+                    </li>
+                    <li>
+                      Kirim perintah: <code>/start {linkToken}</code>
+                    </li>
+                    <li>Token berlaku 15 menit dan hanya bisa dipakai sekali.</li>
+                  </ol>
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    onClick={onGenerateTelegramLink}
+                    disabled={telegramLoading}
+                    style={{ marginTop: "1rem" }}
+                  >
+                    {telegramLoading ? "Memproses…" : "Buat Token Baru"}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={onGenerateTelegramLink}
+                  disabled={telegramLoading}
+                >
+                  {telegramLoading ? "Memproses…" : "Hubungkan Akun Telegram"}
+                </button>
+              )}
+            </>
+          )}
+        </section>
       </div>
     </>
   );

@@ -8,11 +8,67 @@ import { notifySessionChanged, useSessionUser } from "./use-session-user";
 
 /**
  * Aksi autentikasi di navbar:
+ * - Menu "INFORMASI" (Layanan & Tentang Kami) — TERPISAH dari menu akun,
+ *   tersedia untuk tamu maupun yang login (Bagian 6: Informasi tidak
+ *   bercampur dengan dashboard/profil pribadi).
  * - Tamu  -> tombol "Masuk" (link ke /login)
- * - Login -> dropdown "Menu akun": Informasi Diri (profil), Layanan,
- *   Tentang Kami, Keluar. Dashboard ada di navbar utama (DashboardLink).
+ * - Login -> dropdown "Menu akun": Informasi Diri (profil), Keluar.
+ *   Dashboard ada di navbar utama (DashboardLink).
  * Sesi diambil lewat hook bersama (useSessionUser) agar konsisten.
  */
+
+/** Dropdown "Informasi" — Layanan & Tentang Kami (section publik beranda). */
+function InfoMenu() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+    }
+    if (open) document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [open]);
+
+  return (
+    <div className="nav-account" ref={ref}>
+      <button
+        type="button"
+        className="nav-account-trigger"
+        aria-label={open ? "Tutup menu informasi" : "Buka menu informasi"}
+        aria-expanded={open}
+        aria-haspopup="true"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span>Informasi</span>
+        <span className="nav-arrow" aria-hidden="true">▾</span>
+      </button>
+      {open && (
+        <div className="nav-account-menu" role="menu">
+          <Link
+            href="/#features"
+            className="nav-account-item"
+            role="menuitem"
+            onClick={() => setOpen(false)}
+          >
+            <span className="nav-account-icon" aria-hidden="true">🛍️</span>
+            <span>Layanan</span>
+          </Link>
+          <Link
+            href="/#about"
+            className="nav-account-item"
+            role="menuitem"
+            onClick={() => setOpen(false)}
+          >
+            <span className="nav-account-icon" aria-hidden="true">📖</span>
+            <span>Tentang Kami</span>
+          </Link>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AuthNav() {
   const router = useRouter();
   const user = useSessionUser();
@@ -55,69 +111,57 @@ export function AuthNav() {
     const firstName = user.name.split(" ")[0] || user.name;
 
     return (
-      <div className="nav-account" ref={menuRef}>
-        <button
-          type="button"
-          className="nav-account-trigger"
-          aria-label={menuOpen ? "Tutup menu akun" : "Buka menu akun"}
-          aria-expanded={menuOpen}
-          aria-haspopup="true"
-          onClick={() => setMenuOpen((o) => !o)}
-        >
-          <span className="nav-user">Halo, {firstName}</span>
-          <span className="nav-arrow" aria-hidden="true">▾</span>
-        </button>
+      <>
+        <InfoMenu />
+        <div className="nav-account" ref={menuRef}>
+          <button
+            type="button"
+            className="nav-account-trigger"
+            aria-label={menuOpen ? "Tutup menu akun" : "Buka menu akun"}
+            aria-expanded={menuOpen}
+            aria-haspopup="true"
+            onClick={() => setMenuOpen((o) => !o)}
+          >
+            <span className="nav-user">Halo, {firstName}</span>
+            <span className="nav-arrow" aria-hidden="true">▾</span>
+          </button>
 
-        {menuOpen && (
-          <div className="nav-account-menu" role="menu">
-            <Link
-              href={profileHrefFor(user.role)}
-              className="nav-account-item"
-              role="menuitem"
-              onClick={() => setMenuOpen(false)}
-            >
-              <span className="nav-account-icon" aria-hidden="true">👤</span>
-              <span>Informasi Diri</span>
-            </Link>
-            {/* Layanan & Tentang Kami = section publik halaman beranda (tanpa login). */}
-            <Link
-              href="/#features"
-              className="nav-account-item"
-              role="menuitem"
-              onClick={() => setMenuOpen(false)}
-            >
-              <span className="nav-account-icon" aria-hidden="true">🛍️</span>
-              <span>Layanan</span>
-            </Link>
-            <Link
-              href="/#about"
-              className="nav-account-item"
-              role="menuitem"
-              onClick={() => setMenuOpen(false)}
-            >
-              <span className="nav-account-icon" aria-hidden="true">📖</span>
-              <span>Tentang Kami</span>
-            </Link>
-            <hr className="nav-account-divider" />
-            <button
-              type="button"
-              className="nav-account-item nav-logout"
-              role="menuitem"
-              onClick={logout}
-              disabled={loggingOut}
-            >
-              <span className="nav-account-icon" aria-hidden="true">🚪</span>
-              <span>{loggingOut ? "…" : "Keluar"}</span>
-            </button>
-          </div>
-        )}
-      </div>
+          {menuOpen && (
+            <div className="nav-account-menu" role="menu">
+              <Link
+                href={profileHrefFor(user.role)}
+                className="nav-account-item"
+                role="menuitem"
+                onClick={() => setMenuOpen(false)}
+              >
+                <span className="nav-account-icon" aria-hidden="true">👤</span>
+                <span>Informasi Diri</span>
+              </Link>
+              {/* Layanan & Tentang Kami pindah ke menu "Informasi" terpisah. */}
+              <hr className="nav-account-divider" />
+              <button
+                type="button"
+                className="nav-account-item nav-logout"
+                role="menuitem"
+                onClick={logout}
+                disabled={loggingOut}
+              >
+                <span className="nav-account-icon" aria-hidden="true">🚪</span>
+                <span>{loggingOut ? "…" : "Keluar"}</span>
+              </button>
+            </div>
+          )}
+        </div>
+      </>
     );
   }
 
   return (
-    <Link href="/login" className="btn btn-primary auth-link">
-      Masuk
-    </Link>
+    <>
+      <InfoMenu />
+      <Link href="/login" className="btn btn-primary auth-link">
+        Masuk
+      </Link>
+    </>
   );
 }

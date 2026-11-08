@@ -18,13 +18,13 @@ export async function POST(request: NextRequest) {
       return Response.json({ message: "Invalid webhook secret." }, { status: 401 });
     }
 
-    // Debug: log content-type
+    // Log AMAN: hanya metadata — JANGAN pernah mencetak isi body mentah
+    // (bisa memuat token linking "/start <token>" sekali pakai pengguna).
     const contentType = request.headers.get("content-type");
-    console.log("[webhook] content-type:", contentType);
-
     const text = await request.text().catch(() => "");
-    console.log("[webhook] raw body length:", text.length);
-    console.log("[webhook] raw body preview:", text.slice(0, 200));
+    console.log(
+      `[webhook] update diterima (content-type=${contentType ?? "-"}, ${text.length} byte)`,
+    );
 
     let update;
     try {

@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import type { NextRequest } from "next/server";
 import { hashToken, requireUser, SESSION_COOKIE } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { hitRateLimit } from "@/lib/rate-limit";
 import { ApiError, assertSameOrigin, parseJsonBody } from "@/lib/validate";
 
 /**
@@ -14,6 +15,16 @@ export async function POST(request: NextRequest) {
   try {
     assertSameOrigin(request);
     const user = await requireUser();
+
+    // Endpoint sensitif → batasi percobaan per akun (anti brute-force).
+    const limit = hitRateLimit(`pw:${user.id}`, 10, 300_000);
+    if (!limit.ok) {
+      return Response.json(
+        { message: `Terlalu banyak percobaan. Coba lagi dalam ${limit.retryAfterSeconds} detik.` },
+        { status: 429 },
+      );
+    }
+
     const body = await parseJsonBody(request);
 
     const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";

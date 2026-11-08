@@ -172,7 +172,7 @@ export default function AdminProfilePage() {
     <>
       <div className="dash-head">
         <div>
-          <h1>Profil Admin</h1>
+          <h1>Informasi Diri</h1>
           <p>
             {profile
               ? `Administrator sejak ${formatDateId(profile.createdAt)}`

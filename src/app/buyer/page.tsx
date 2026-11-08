@@ -78,9 +78,12 @@ export default function BuyerProfilePage() {
       });
   }, [router]);
 
-  // Load Telegram link token if not linked
+  // Load Telegram link token if not linked — TUNGGU profil termuat dulu,
+  // agar pengguna yang sudah terhubung tidak membuat token baru tiap membuka
+  // halaman (dulu: selalu mint karena status belum diketahui saat mount).
   const loadTelegramLink = useCallback(async () => {
-    if (profile?.telegramChatId) return;
+    if (!profile) return;
+    if (profile.telegramChatId) return;
     try {
       const res = await fetch("/api/telegram/link", {
         method: "POST",
@@ -95,7 +98,7 @@ export default function BuyerProfilePage() {
     } catch {
       // ignore
     }
-  }, [profile?.telegramChatId]);
+  }, [profile]);
 
   useEffect(() => {
     let cancelled = false;

@@ -432,6 +432,7 @@ describe("generateReply — kondisi provider AI", () => {
         focus: kerapu,
       });
       expect(r.source).toBe("fallback");
+      expect(r.fallbackReason).toBe("no-ai-config");
       expect(r.reply).toContain("Ikan Kerapu Macan Segar (1 Kg)");
       const logged = info.mock.calls.flat().join(" ");
       expect(logged).not.toMatch(/nvapi-|Bearer|sk-/i);
@@ -461,6 +462,7 @@ describe("generateReply — kondisi provider AI", () => {
         focus: kerapu,
       });
       expect(r.source).toBe("fallback");
+      expect(r.fallbackReason).toBe("provider-error");
       expect(r.reply).toContain("Ikan Kerapu Macan Segar (1 Kg)");
       const logged = warn.mock.calls.flat().join(" ");
       expect(logged).toContain("[ai]");
@@ -471,6 +473,21 @@ describe("generateReply — kondisi provider AI", () => {
       process.env.AI_MODEL = prev.model;
       process.env.AI_TIMEOUT_MS = prev.timeout;
     }
+  });
+
+  it("filter harga aktif → fallback deterministik + fallbackReason 'filtered'", async () => {
+    // Jalur filter SELALU deterministik (by design) — bukan kegagalan provider,
+    // sehingga UI menampilkan catatan "query terfilter", bukan error AI.
+    const r = await generateReply({
+      message: "Produk di bawah Rp50.000",
+      history: [],
+      products: [kerapu],
+      sections: [],
+      filters: { price: { max: 50000, maxExclusive: true } },
+    });
+    expect(r.source).toBe("fallback");
+    expect(r.fallbackReason).toBe("filtered");
+    expect(r.reply.length).toBeGreaterThan(0);
   });
 
   it("provider membalas 401 (API key tidak valid) → fallback, key tidak masuk log", async () => {
@@ -495,6 +512,7 @@ describe("generateReply — kondisi provider AI", () => {
         sections: [],
       });
       expect(r.source).toBe("fallback");
+      expect(r.fallbackReason).toBe("provider-error");
       const logged = warn.mock.calls.flat().join(" ");
       expect(logged).toContain("provider HTTP 401");
       expect(logged).not.toContain("nvapi-test-tidak-valid");
@@ -790,6 +808,19 @@ describe("extractSubjectPhrase — ekstraksi subjek dari bahasa Indonesia", () =
   it("sorting dibuang dari subjek: 'umpan di bawah 75000 termurah' → 'umpan'", () => {
     expect(extractSubjectPhrase("umpan di bawah 75000 termurah")).toBe("umpan");
   });
+
+  it("rujukan ber-imbuhan '-nya' → kata dasar (bukan frasa sampah)", () => {
+    // Regresi Q13: "Berapa stoknya?" dulu jadi subjek name "stoknya" yang
+    // mematikan katalog & menyaring konteks percakapan.
+    expect(extractSubjectPhrase("Berapa stoknya?")).toBeNull();
+    expect(extractSubjectPhrase("Yang tadi harganya berapa?")).toBeNull();
+    expect(extractSubjectPhrase("Kerapunya masih ada?")).toBe("kerapu");
+    expect(extractSubjectPhrase("Ikan yang stoknya habis?")).toBe("ikan");
+  });
+
+  it("atribut non-produk bukan subjek: 'Bagaimana status pesanan saya?' → null", () => {
+    expect(extractSubjectPhrase("Bagaimana status pesanan saya?")).toBeNull();
+  });
 });
 
 describe("matchSubjectToCategories — validasi subjek ke kategori aktual", () => {
@@ -866,6 +897,11 @@ describe("extractKeywords — membuang angka & kata filter (bukan keyword)", () 
 
   it("subjek tetap jadi keyword (dibersihkan kemudian oleh pemanggil bila perlu)", () => {
     expect(extractKeywords("hasil laut di bawah 50000")).toEqual(["hasil", "laut"]);
+  });
+
+  it("rujukan '-nya' dinormalkan ke kata dasar lalu dibuang bila stopword", () => {
+    expect(extractKeywords("Berapa stoknya?")).toEqual([]);
+    expect(extractKeywords("Kerapunya masih ada?")).toEqual(["kerapu"]);
   });
 });
 

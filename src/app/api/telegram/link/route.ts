@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { requireUser } from "@/lib/auth";
 import { generateLinkToken, hashLinkToken } from "@/lib/telegram";
 import { prisma } from "@/lib/prisma";
+import { hitRateLimit } from "@/lib/rate-limit";
 import { ApiError, assertSameOrigin } from "@/lib/validate";
 
 /**
@@ -13,6 +14,15 @@ export async function POST(request: NextRequest) {
   try {
     assertSameOrigin(request);
     const user = await requireUser();
+
+    // Endpoint sensitif (mencetak token linking) → batasi pembuatan per akun.
+    const limit = hitRateLimit(`tg-link:${user.id}`, 10, 300_000);
+    if (!limit.ok) {
+      return Response.json(
+        { message: `Terlalu banyak permintaan. Coba lagi dalam ${limit.retryAfterSeconds} detik.` },
+        { status: 429 },
+      );
+    }
 
     // Cek apakah sudah terhubung
     if (user.telegramChatId) {

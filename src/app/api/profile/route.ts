@@ -21,6 +21,12 @@ export async function GET() {
         address: true,
         phone: true,
         whatsappNotify: true,
+        // Status linking Telegram milik sendiri — dipakai panel "Notifikasi
+        // Telegram" di Informasi Diri (tanpa ini panel selalu tampil belum
+        // terhubung & token baru terus dibuat).
+        telegramChatId: true,
+        telegramLinkedAt: true,
+        telegramNotify: true,
         isActive: true,
         createdAt: true,
         _count: { select: { orders: true } },
@@ -37,6 +43,9 @@ export async function GET() {
         address: dbUser.address,
         phone: dbUser.phone,
         whatsappNotify: dbUser.whatsappNotify,
+        telegramChatId: dbUser.telegramChatId,
+        telegramLinkedAt: dbUser.telegramLinkedAt?.toISOString() ?? null,
+        telegramNotify: dbUser.telegramNotify,
         orderCount: dbUser._count.orders,
         createdAt: dbUser.createdAt.toISOString(),
       },

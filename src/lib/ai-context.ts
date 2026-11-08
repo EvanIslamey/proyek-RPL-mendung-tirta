@@ -313,7 +313,7 @@ async function fetchOrders(user: SafeUser): Promise<ContextSection | null> {
 
     return {
       key: "orders",
-      label: "Pesanan pembeli yang sedang login (5 terbaru)",
+      label: `Pesanan pembeli yang sedang login (${orders.length} terbaru)`,
       scope: "milik-sendiri",
       asOf,
       text,
@@ -348,7 +348,7 @@ async function fetchOrders(user: SafeUser): Promise<ContextSection | null> {
 
     return {
       key: "orders",
-      label: `Pesanan berisi produk toko "${store.storeName}" (8 terbaru)`,
+      label: `Pesanan berisi produk toko "${store.storeName}" (${items.length} terbaru)`,
       scope: "toko-sendiri",
       asOf,
       text,
@@ -1238,6 +1238,28 @@ export async function buildChatContext(
     contextProducts.length === 0 &&
     /\bharganya\b|\bstoknya\b|\bmasih ada\b|detailnya|yang tadi|\bukuran lain\b|\bvarian lain\b/i.test(message) &&
     !/\bapa saja\b|\bkatalog\b|\bdaftar\b|semua produk|produk yang (?:tersedia|ada)|produk apa/i.test(message);
+
+  // Subjek name-mode yang TIDAK cocok dengan produk mana pun ("status",
+  // "stoknya", "perahu") → LEPAS dari filter final. Subjek semacam ini hanya
+  // bisa mematikan katalog & menyaring konteks percakapan tanpa guna
+  // (regresi pertanyaan lanjutan "Berapa stoknya?" yang terbuang). Pencarian
+  // sudah dijalankan dengan subjeknya (hasil tetap jujur: kosong), lalu
+  // dicari ulang tanpa subjek. Dilewati untuk pertanyaan JUMLUH —
+  // "berapa jumlah produk perahu?" tetap dijawab 0 lewat filter name
+  // (bukan total seluruh produk).
+  if (filters.subject && filters.subject.mode === "name" && !hasCount && products.length === 0) {
+    const subjectMatches = await prisma.product.count({
+      where: { name: { contains: filters.subject.value, mode: "insensitive" } },
+    });
+    if (subjectMatches === 0) {
+      filters.subject = undefined;
+      if (catalogRelevant) {
+        products = baseKeywords.length > 0
+          ? await searchCatalog(baseKeywords, filters)
+          : await searchCatalog([], filters);
+      }
+    }
+  }
 
   const jobs: (Promise<ContextSection | null> | null)[] = [];
   // Hitungan spesifik ("berapa jumlah penjual?") → jawaban HANYA entitas yang

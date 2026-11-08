@@ -30,7 +30,7 @@ const STOPWORDS = new Set([
   // kondisi filter terstruktur, jangan dipakai sebagai ILIKE keyword).
   "harga", "atas", "bawah", "lebih", "kurang", "maksimal", "maks", "maksimum",
   "minimum", "minimal", "ribu", "juta", "rp", "antara", "sampai", "hingga",
-  "termurah", "termahal", "urutkan", "urut", "stok", "tersedia", "ready",
+  "termurah", "termahal", "urutkan", "urut", "stok", "status", "tersedia", "ready",
   "habis", "masih", "kategori", "jenis", "toko", "penjual", "produk",
   "cari", "carikan", "mau", "beli", "jual", "adakah", "nggak", "dong",
   "donk", "nih", "rating", "bintang", "ulasan", "review", "komentar",
@@ -218,7 +218,24 @@ const SUBJECT_FILLERS = new Set([
   // Kata entitas peran/bisnis — bukan jenis produk.
   "penjual", "pembeli", "pengguna", "admin", "seller", "buyer", "toko",
   "akun", "profil", "pesanan", "order", "penjualan", "statistik", "rekap",
+  // Atribut/rujukan percakapan — bukan nama produk ("status pesanan",
+  // "produk yang tadi").
+  "status", "tadi",
 ]);
+
+/**
+ * Buang imbuhan penunjuk "-nya" pada kata rujukan ("stoknya"→"stok",
+ * "harganya"→"harga", "kerapunya"→"kerapu") supaya frasa subjek/keyword
+ * berisi kata dasar yang bisa dicocokkan ke filler/stopword/kategori.
+ * Sisa kata minimal 3 karakter agar tidak memotong kata sembarangan.
+ */
+function stripNyaSuffix(word: string): string {
+  if (word.length >= 6 && word.endsWith("nya")) {
+    const base = word.slice(0, -3);
+    if (base.length >= 3) return base;
+  }
+  return word;
+}
 
 /**
  * Ekstraksi SUBJEK produk dari pesan (murni, tanpa DB — untuk unit test).
@@ -263,6 +280,7 @@ export function extractSubjectPhrase(message: string): string | null {
   m = m.replace(/[^\p{L}\p{N}\s-]/gu, " ");
   const words = m
     .split(/\s+/)
+    .map(stripNyaSuffix)
     .filter((w) => w && w.length > 1 && !SUBJECT_FILLERS.has(w) && !/^\d+$/.test(w));
   if (words.length === 0) return null;
   return words.slice(0, 4).join(" ").trim();
@@ -479,6 +497,17 @@ export function filterProductsByPrice(products: AiProduct[], filter: PriceFilter
   return products.filter((p) => productMatchesPriceFilter(p, filter));
 }
 
+/**
+ * Alasan jawaban memakai jalur fallback (source="fallback") — agar UI bisa
+ * menampilkan catatan yang JUJUR sesuai kondisi, bukan satu label generik:
+ * - "no-ai-config"  : AI memang belum dikonfigurasi (mode katalog = normal).
+ * - "filtered"      : filter aktif → sengaja memakai jalur deterministik
+ *                     (by design, bukan kegagalan provider).
+ * - "provider-error": AI SUDAH dikonfigurasi tapi provider gagal/timeout/
+ *                     jawaban kosong → tampilkan pemberitahuan jelas.
+ */
+export type FallbackReason = "no-ai-config" | "filtered" | "provider-error";
+
 export type AiChatResult = {
   reply: string;
   products: AiProduct[];
@@ -486,6 +515,8 @@ export type AiChatResult = {
   sources: { label: string; asOf: string }[];
   generatedAt: string;
   source: "ai" | "fallback";
+  /** Hanya saat source="fallback" — alasan spesifik untuk catatan UI. */
+  fallbackReason?: FallbackReason;
 };
 
 /** Ambil kata kunci bermakna dari pesan user (untuk pencarian katalog). */
@@ -494,6 +525,7 @@ export function extractKeywords(message: string): string[] {
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s-]/gu, " ")
     .split(/\s+/)
+    .map(stripNyaSuffix)
     // Angka murni dibuang — harga/rentang sudah jadi filter terstruktur.
     .filter((w) => w.length > 2 && !STOPWORDS.has(w) && !/^\d+$/.test(w));
   return [...new Set(words)].slice(0, 6);
@@ -625,8 +657,15 @@ export async function searchCatalog(
     LIMIT 12
   `);
 
-  // Jika keyword tidak match, coba pencarian longgar (hanya filter non-keyword)
-  if (rows.length === 0 && keywords.length > 0) {
+  // Jika keyword tidak match, coba pencarian longgar (hanya filter non-keyword).
+  // HANYA bila ada filter terstruktur — tanpa filter sama sekali, "longgar"
+  // berarti membuang keyword dan mengembalikan produk acak untuk pertanyaan
+  // yang memang tak ada jawabannya (menyesatkan; jawaban jujur: kosong).
+  const hasStructuredFilter = !!(
+    pf.price || pf.category || pf.store || pf.subject ||
+    pf.inStock !== undefined || pf.minRating || pf.sortBy
+  );
+  if (rows.length === 0 && keywords.length > 0 && hasStructuredFilter) {
     const looseWhere = Prisma.join([stockMatch, ...filterParts], " AND ");
     const looseRows = await prisma.$queryRaw<ProductRow[]>(Prisma.sql`
       SELECT p.id, p.name, p.price::float AS price, p.stock, p.image,
@@ -1293,7 +1332,10 @@ export async function generateReply(opts: {
   const contextProducts = opts.contextProducts ?? [];
   const focus = opts.focus ?? null;
   const focusCandidates = opts.focusCandidates ?? [];
-  const fallback = () => fallbackResult({ ...opts, generatedAt });
+  const fallback = (reason?: FallbackReason): AiChatResult => {
+    const r = fallbackResult({ ...opts, generatedAt });
+    return reason ? { ...r, fallbackReason: reason } : r;
+  };
 
   // Query BERFILTER (subjek/harga/kategori/toko/stok/rating) → jawaban
   // DETERMINISTIK lewat komposer fallback: format stabil ("Menampilkan X
@@ -1311,7 +1353,7 @@ export async function generateReply(opts: {
       opts.filters.minRating !== undefined)
   );
   if (hasActiveFilters) {
-    return fallback();
+    return fallback("filtered");
   }
 
   // Union untuk validasi marker [produk:id] & label sumber katalog.
@@ -1329,7 +1371,7 @@ export async function generateReply(opts: {
       noKeyLogged = true;
       console.info("[ai] AI_API_KEY belum dikonfigurasi — memakai jawaban fallback berbasis data.");
     }
-    return fallback();
+    return fallback("no-ai-config");
   }
 
   const baseUrl = aiRuntime.baseUrl;
@@ -1380,7 +1422,7 @@ export async function generateReply(opts: {
 
     if (!reply) {
       console.warn(`[ai] provider ${model} mengembalikan jawaban kosong → fallback.`);
-      return fallback();
+      return fallback("provider-error");
     }
     return {
       reply,
@@ -1394,6 +1436,6 @@ export async function generateReply(opts: {
     // lalu tampilkan jawaban fallback berbasis data.
     const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     console.warn(`[ai] provider ${model} gagal → fallback. ${detail}`);
-    return fallback();
+    return fallback("provider-error");
   }
 }

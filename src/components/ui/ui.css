@@ -1,10 +1,10 @@
 /* Komponen UI lintas halaman: toast + modal */
 
-/* Toast */
+/* Toast — kiri-bawah: sisi kanan-bawah kini dipakai tombol asisten AI. */
 .toast-region {
   position: fixed;
   bottom: 1.25rem;
-  right: 1.25rem;
+  left: 1.25rem;
   z-index: 2000;
   display: flex;
   flex-direction: column;

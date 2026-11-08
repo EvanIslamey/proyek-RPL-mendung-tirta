@@ -21,7 +21,7 @@ export default async function SellerLayout({ children }: { children: React.React
         <aside className="dash-sidebar" aria-label="Navigasi dashboard penjual">
           <span className="dash-sidebar-title">Panel Penjual</span>
           <DashNavLink href="/seller/dashboard">📊 Dashboard</DashNavLink>
-          <DashNavLink href="/seller/profile">👤 Profil</DashNavLink>
+          <DashNavLink href="/seller/profile">👤 Informasi Diri</DashNavLink>
           <DashNavLink href="/seller/products">📦 Produk</DashNavLink>
           <DashNavLink href="/seller/orders">🧾 Pesanan</DashNavLink>
         </aside>

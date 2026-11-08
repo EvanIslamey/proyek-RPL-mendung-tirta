@@ -3,7 +3,7 @@
 .ai-fab {
   position: fixed;
   bottom: 1.25rem;
-  left: 1.25rem;
+  right: 1.25rem;
   z-index: 1200;
   width: 56px;
   height: 56px;
@@ -29,7 +29,7 @@
 .ai-panel {
   position: fixed;
   bottom: 5.25rem;
-  left: 1.25rem;
+  right: 1.25rem;
   z-index: 1200;
   width: min(380px, calc(100vw - 2rem));
   height: min(480px, calc(100vh - 8rem));
@@ -70,6 +70,25 @@
   font-size: 1.5rem;
   line-height: 1;
   cursor: pointer;
+}
+
+/* Aksi kepala panel: reset percakapan + tutup */
+.ai-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.ai-panel-head .ai-reset {
+  font-size: 1.05rem;
+  padding: 0.15rem 0.35rem;
+  border-radius: 6px;
+  opacity: 0.85;
+}
+
+.ai-panel-head .ai-reset:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .ai-messages {
@@ -120,6 +139,14 @@
   font-size: 0.7rem;
   font-style: italic;
   color: var(--text-muted, #6b7280);
+}
+
+/* Provider AI gagal (sudah dikonfigurasi) — penekanan agar tidak dianggap
+   jawaban normal (Bagian 2E). */
+.ai-note-warn {
+  font-style: normal;
+  color: #b45309;
+  font-weight: 600;
 }
 
 /* Label sumber data aktual (Fitur A) — ringkas & boleh panjang */

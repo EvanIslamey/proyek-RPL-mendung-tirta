@@ -106,6 +106,25 @@ async function main() {
   const seller = await login("nelayan.budi@mendungtirta.com", "password123");
   const seller2 = await login("toko.pancing.jaya@mendungtirta.com", "password123");
 
+  // Rangkaian transisi/review memakai produk MILIK `seller`. Daftar publik
+  // (sort terbaru) bisa menampilkan produk toko lain — PATCH penjual lalu 404
+  // (scoping benar) dan seluruh rangkaian gagal berantai. Ambil milik seller.
+  {
+    const r = await api("/api/seller/products", { cookie: seller });
+    const owned = ((r.json?.items ?? []) as NonNullable<typeof productWithStock>[])
+      .find((p) => p.stock >= 3);
+    check(
+      "penjual punya produk stok >= 3 untuk uji transisi",
+      Boolean(owned),
+      `status ${r.status}, produk ${((r.json?.items ?? []) as unknown[]).length}`,
+    );
+    if (owned) productWithStock = owned;
+    else {
+      console.error("Produk penjual dengan stok >= 3 tidak ada — seed belum jalan?");
+      process.exit(1);
+    }
+  }
+
   // --- 3. Checkout sukses (stok didekrementasi, total dari server) ---
   const stockBefore = productWithStock.stock;
   let orderId = "";

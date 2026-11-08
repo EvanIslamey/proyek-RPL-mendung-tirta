@@ -23,6 +23,8 @@ type ChatMessage = {
   products?: Product[];
   sources?: { label: string; asOf: string }[];
   source?: "ai" | "fallback";
+  /** Alasan fallback dari backend — untuk catatan UI yang jujur. */
+  fallbackReason?: "no-ai-config" | "filtered" | "provider-error";
   error?: boolean;
 };
 
@@ -34,12 +36,67 @@ const GREETING: ChatMessage = {
     'Coba tulis misalnya "joran untuk pemula" atau "ikan segar hari ini".',
 };
 
-/** Sembunyikan widget di area dashboard & halaman autentikasi. */
-const HIDDEN_PREFIXES = ["/seller", "/admin", "/login", "/register"];
+/** Sembunyikan hanya di halaman autentikasi — di semua halaman lain (termasuk
+ *  dashboard seller/admin setelah login) chatbot tetap tersedia (Bagian 3). */
+const HIDDEN_PREFIXES = ["/login", "/register"];
+
+/** Batas wajar riwayat percakapan (jumlah pesan di sesi & di penyimpanan). */
+const MAX_MESSAGES = 40;
+
+const storageKeyFor = (userId: string): string => `mt-ai-chat:${userId}`;
+
+function isStoredMessage(m: unknown): m is ChatMessage {
+  if (!m || typeof m !== "object") return false;
+  const o = m as Record<string, unknown>;
+  return (
+    typeof o.id === "number" &&
+    (o.role === "user" || o.role === "assistant") &&
+    typeof o.text === "string"
+  );
+}
+
+/** Pulihkan riwayat chat milik akun INI dari sessionStorage (per tab). */
+function loadStoredMessages(userId: string): ChatMessage[] | null {
+  try {
+    const raw = sessionStorage.getItem(storageKeyFor(userId));
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    const msgs = parsed.filter(isStoredMessage).slice(-MAX_MESSAGES);
+    return msgs.length > 0 ? msgs : null;
+  } catch {
+    return null; // storage diblokir/penuh → riwayat hanya di memori
+  }
+}
+
+function saveStoredMessages(userId: string, messages: ChatMessage[]): void {
+  try {
+    sessionStorage.setItem(
+      storageKeyFor(userId),
+      JSON.stringify(messages.slice(-MAX_MESSAGES)),
+    );
+  } catch {
+    /* abaikan — riwayat tetap ada di memori sesi */
+  }
+}
+
+function clearStoredMessages(userId: string): void {
+  try {
+    sessionStorage.removeItem(storageKeyFor(userId));
+  } catch {
+    /* abaikan */
+  }
+}
+
+/** Tambah satu pesan + terapkan batas riwayat (contextual typing terjaga). */
+function appendMessage(prev: ChatMessage[], msg: ChatMessage): ChatMessage[] {
+  return [...prev, msg].slice(-MAX_MESSAGES);
+}
 
 export function AIWidget() {
   const pathname = usePathname();
   const sessionUser = useSessionUser();
+  const userId = sessionUser?.id ?? null;
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([GREETING]);
   const [input, setInput] = useState("");
@@ -47,22 +104,34 @@ export function AIWidget() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const nextId = useRef(1);
-  const lastUserId = useRef<string | null | undefined>(undefined);
+  // Id akun yang konteksnya sedang aktif di sesi ini (undefined = belum pernah).
+  const [trackedUserId, setTrackedUserId] = useState<string | null | undefined>(undefined);
 
-  // Isolasi konteks per akun: reset riwayat chat saat login/logout/ganti akun
-  // — jangan membawa konteks percakapan akun sebelumnya.
+  // Isolasi konteks per akun — pola resmi React "adjusting state during render":
+  // saat id akun berubah (login/logout/ganti akun), sesi aktif dibersihkan dari
+  // konteks akun sebelumnya lalu memuat riwayat milik akun baru (jika ada).
+  // Dijalankan saat render (bukan efek) → tanpa cascading render.
+  if (trackedUserId !== userId) {
+    // Keluar/ganti akun → hapus riwayat tersimpan akun SEBELUMNYA: sesi
+    // berikutnya wajib mulai bersih (syarat: reset saat logout/ganti akun).
+    if (trackedUserId) clearStoredMessages(trackedUserId);
+    const stored = userId ? loadStoredMessages(userId) : null;
+    setTrackedUserId(userId);
+    setMessages(stored ?? [GREETING]);
+    // Jangan tutup panel saat mount pertama — hanya saat akun benar-benar berganti.
+    if (trackedUserId !== undefined) setOpen(false);
+  }
+
+  // nextId (ref) disesuaikan lewat efek — ref hanya boleh diakses di luar render.
   useEffect(() => {
-    if (lastUserId.current === undefined) {
-      lastUserId.current = sessionUser?.id ?? null; // mount pertama: jangan reset
-      return;
-    }
-    if (lastUserId.current !== (sessionUser?.id ?? null)) {
-      lastUserId.current = sessionUser?.id ?? null;
-      setMessages([GREETING]);
-      nextId.current = 1;
-      setOpen(false);
-    }
-  }, [sessionUser?.id]);
+    const stored = trackedUserId ? loadStoredMessages(trackedUserId) : null;
+    nextId.current = stored ? stored.reduce((m, x) => Math.max(m, x.id + 1), 1) : 1;
+  }, [trackedUserId]);
+
+  // Persistensi riwayat per akun (bertahan saat berpindah halaman & reload).
+  useEffect(() => {
+    if (userId && messages.length > 0) saveStoredMessages(userId, messages);
+  }, [userId, messages]);
 
   useEffect(() => {
     if (open) {
@@ -73,6 +142,12 @@ export function AIWidget() {
 
   if (HIDDEN_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
     return null;
+  }
+
+  function resetChat() {
+    setMessages([GREETING]);
+    nextId.current = 1;
+    if (userId) clearStoredMessages(userId);
   }
 
   async function send(e: React.FormEvent<HTMLFormElement>) {
@@ -91,10 +166,10 @@ export function AIWidget() {
           ? { productIds: m.products.slice(0, 3).map((p) => p.id) }
           : {}),
       }));
-    const userId = nextId.current++;
+    const userIdMsg = nextId.current++;
     const assistantId = nextId.current++;
 
-    setMessages((prev) => [...prev, { id: userId, role: "user", text: message }]);
+    setMessages((prev) => appendMessage(prev, { id: userIdMsg, role: "user", text: message }));
     setInput("");
     setBusy(true);
 
@@ -109,6 +184,7 @@ export function AIWidget() {
         products?: Product[];
         sources?: { label: string; asOf: string }[];
         source?: "ai" | "fallback";
+        fallbackReason?: ChatMessage["fallbackReason"];
         message?: string;
       } = await res.json().catch(() => ({}));
 
@@ -117,36 +193,49 @@ export function AIWidget() {
           res.status === 401
             ? "Silakan masuk terlebih dahulu untuk memakai asisten."
             : (data.message ?? "Maaf, terjadi kesalahan. Coba lagi.");
-        setMessages((prev) => [
-          ...prev,
-          { id: assistantId, role: "assistant", text, error: true },
-        ]);
+        setMessages((prev) =>
+          appendMessage(prev, { id: assistantId, role: "assistant", text, error: true }),
+        );
         return;
       }
 
-      setMessages((prev) => [
-        ...prev,
-        {
+      setMessages((prev) =>
+        appendMessage(prev, {
           id: assistantId,
           role: "assistant",
           text: data.reply ?? "Maaf, saya belum bisa menjawab.",
           products: data.products,
           sources: data.sources,
           source: data.source,
-        },
-      ]);
+          fallbackReason: data.fallbackReason,
+        }),
+      );
     } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
+      setMessages((prev) =>
+        appendMessage(prev, {
           id: assistantId,
           role: "assistant",
           text: "Tidak dapat terhubung ke server. Periksa koneksi Anda.",
           error: true,
-        },
-      ]);
+        }),
+      );
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Catatan jujur sesuai kondisi fallback (Bagian 2E) — provider error diberi
+  // penekanan visual, bukan disamarkan sebagai jawaban normal.
+  function fallbackNote(reason: ChatMessage["fallbackReason"]): string {
+    switch (reason) {
+      case "provider-error":
+        return "AI sementara tidak tersedia — jawaban diambil dari data database terkini. Penyebabnya sudah dicatat di server.";
+      case "filtered":
+        return "Disusun langsung dari data database terkini (query terfilter).";
+      case "no-ai-config":
+        return "Mode katalog — jawaban dari data database terkini (AI belum dikonfigurasi).";
+      default:
+        return "Mode katalog — jawaban dari data database terkini (tanpa AI).";
     }
   }
 
@@ -159,9 +248,20 @@ export function AIWidget() {
               <strong>Asisten Mendung Tirta</strong>
               <span className="ai-status">Tanya produk, stok, pesanan & statistik</span>
             </div>
-            <button type="button" aria-label="Tutup asisten" onClick={() => setOpen(false)}>
-              ×
-            </button>
+            <div className="ai-head-actions">
+              <button
+                type="button"
+                className="ai-reset"
+                title="Percakapan baru"
+                aria-label="Mulai percakapan baru"
+                onClick={resetChat}
+              >
+                ↺
+              </button>
+              <button type="button" aria-label="Tutup asisten" onClick={() => setOpen(false)}>
+                ×
+              </button>
+            </div>
           </header>
 
           <div className="ai-messages" ref={scrollRef} aria-live="polite">
@@ -170,7 +270,13 @@ export function AIWidget() {
                 <p className="ai-msg-text">{m.text}</p>
 
                 {m.source === "fallback" && (
-                  <span className="ai-note">Mode katalog — jawaban dari data database terkini (tanpa AI).</span>
+                  <span
+                    className={`ai-note${
+                      m.fallbackReason === "provider-error" ? " ai-note-warn" : ""
+                    }`}
+                  >
+                    {fallbackNote(m.fallbackReason)}
+                  </span>
                 )}
 
                 {m.role === "assistant" && !!m.sources?.length && (
