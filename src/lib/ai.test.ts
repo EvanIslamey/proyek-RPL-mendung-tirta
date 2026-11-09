@@ -8,6 +8,8 @@ import {
   isSingleProductQuestion,
   fallbackResult,
   generateReply,
+  streamReply,
+  isGreetingMessage,
   parsePriceFilter,
   parseProductFilters,
   parseCategoryFilter,
@@ -18,6 +20,7 @@ import {
   filterProductsByPrice,
   productMatchesPriceFilter,
   type AiProduct,
+  type AiChatResult,
   type PriceFilter,
   type ProductFilter,
 } from "@/lib/ai";
@@ -425,18 +428,44 @@ describe("generateReply — kondisi provider AI", () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
       const r = await generateReply({
+        message: "Produk apa saja yang dijual di Mendung Tirta?",
+        history: [],
+        products: [],
+        sections: [catalogSection],
+      });
+      expect(r.source).toBe("fallback");
+      expect(r.fallbackReason).toBe("no-ai-config");
+      expect(r.reply).toContain("Berikut data terkini dari aplikasi");
+      const logged = info.mock.calls.flat().join(" ");
+      expect(logged).not.toMatch(/nvapi-|Bearer|sk-/i);
+    } finally {
+      if (prevKey !== undefined) process.env.AI_API_KEY = prevKey;
+    }
+  });
+
+  it("pertanyaan berdata (fokus produk) → JALUR DIRECT tanpa AI & tanpa key", async () => {
+    // Routing cerdas: fokus/riwayat/hitungan dijawab dari data — provider
+    // tidak perlu dipanggil (ini penyebab lambat lama: menunggu AI 90 dtk).
+    const prevKey = process.env.AI_API_KEY;
+    delete process.env.AI_API_KEY;
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("provider tidak boleh dipanggil untuk jalur direct");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const r = await generateReply({
         message: "Berapa stok ikan kerapu?",
         history: [],
         products: [kerapu],
         sections: [],
         focus: kerapu,
       });
+      expect(fetchSpy).not.toHaveBeenCalled();
       expect(r.source).toBe("fallback");
-      expect(r.fallbackReason).toBe("no-ai-config");
+      expect(r.fallbackReason).toBe("direct");
       expect(r.reply).toContain("Ikan Kerapu Macan Segar (1 Kg)");
-      const logged = info.mock.calls.flat().join(" ");
-      expect(logged).not.toMatch(/nvapi-|Bearer|sk-/i);
     } finally {
+      vi.unstubAllGlobals();
       if (prevKey !== undefined) process.env.AI_API_KEY = prevKey;
     }
   });
@@ -455,15 +484,14 @@ describe("generateReply — kondisi provider AI", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const r = await generateReply({
-        message: "Berapa stok ikan kerapu?",
+        message: "Apa saja produk yang dijual di sini?",
         history: [],
-        products: [kerapu],
-        sections: [],
-        focus: kerapu,
+        products: [],
+        sections: [catalogSection],
       });
       expect(r.source).toBe("fallback");
       expect(r.fallbackReason).toBe("provider-error");
-      expect(r.reply).toContain("Ikan Kerapu Macan Segar (1 Kg)");
+      expect(r.reply).toContain("Berikut data terkini dari aplikasi");
       const logged = warn.mock.calls.flat().join(" ");
       expect(logged).toContain("[ai]");
       expect(logged).not.toContain("test-key-rahasia-jangan-log");
@@ -506,7 +534,7 @@ describe("generateReply — kondisi provider AI", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const r = await generateReply({
-        message: "halo",
+        message: "Mengapa ikan laut kaya omega-3?",
         history: [],
         products: [],
         sections: [],
@@ -545,11 +573,12 @@ describe("generateReply — kondisi provider AI", () => {
     process.env.AI_BASE_URL = "https://example.invalid/v1";
     try {
       const r = await generateReply({
-        message: "Berapa stok ikan kerapu?",
+        message: "Ceritakan soal stok ikan kerapu untuk pembeli",
         history: [],
         products: [kerapu],
         sections: [],
-        focus: kerapu,
+        // Tanpa focus/contextProducts → pertanyaan terbuka = jalur AI dengan
+        // KATALOG sebagai grounding (marker [produk:id] tetap divalidasi).
       });
       expect(r.source).toBe("ai");
       expect(r.reply).toContain("Stok Ikan Kerapu saat ini 4");
@@ -562,22 +591,13 @@ describe("generateReply — kondisi provider AI", () => {
     }
   });
 
-  it("prompt hitungan → menyertakan angka section + instruksi tanpa statistik lain", async () => {
-    const bodies: { messages: { role: string; content: string }[] }[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_url: unknown, init?: { body?: string }) => {
-        bodies.push(JSON.parse(init?.body ?? "{}"));
-        return new Response(
-          JSON.stringify({
-            choices: [
-              { message: { content: "Saat ini terdapat 3 penjual terdaftar di Mendung Tirta." } },
-            ],
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
-      }),
-    );
+  it("pertanyaan hitungan → JALUR DIRECT dari section: tanpa provider, angka tetap tampil", async () => {
+    // Routing baru: hitungan dijawab langsung dari data (bukan lagi menunggu
+    // AI) — inilah yang dulu memakan timeout 90 detik untuk "berapa jumlah…".
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("provider tidak boleh dipanggil untuk pertanyaan hitungan");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
     const prev = { key: process.env.AI_API_KEY, base: process.env.AI_BASE_URL };
     process.env.AI_API_KEY = "nvapi-test";
     process.env.AI_BASE_URL = "https://example.invalid/v1";
@@ -588,14 +608,12 @@ describe("generateReply — kondisi provider AI", () => {
         products: [],
         sections: [countSection],
       });
-      expect(r.source).toBe("ai");
-      expect(bodies).toHaveLength(1);
-      const systemText = bodies[0].messages.map((m) => m.content).join("\n");
-      // Data hitungan dari DB & instruksi eksplisit agar tidak menambah statistik lain.
-      expect(systemText).toContain("Saat ini terdapat 3 penjual terdaftar di Mendung Tirta.");
-      expect(systemText).toMatch(/JANGAN tambahkan statistik atau daftar lain/);
-      expect(systemText).toMatch(/HANYA dengan angka dari section/);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(r.source).toBe("fallback");
+      expect(r.fallbackReason).toBe("direct");
+      expect(r.reply).toContain("3 penjual terdaftar");
     } finally {
+      vi.unstubAllGlobals();
       process.env.AI_API_KEY = prev.key;
       process.env.AI_BASE_URL = prev.base;
     }
@@ -659,6 +677,177 @@ describe("generateReply — kondisi provider AI", () => {
       vi.unstubAllGlobals();
       process.env.AI_API_KEY = prev.key;
     }
+  });
+
+  it("sapaan tanpa data → jawaban ramah instan, TANPA provider & TANPA query", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("provider tidak boleh dipanggil untuk sapaan");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const prev = { key: process.env.AI_API_KEY, base: process.env.AI_BASE_URL };
+    process.env.AI_API_KEY = "nvapi-test";
+    process.env.AI_BASE_URL = "https://example.invalid/v1";
+    try {
+      const r = await generateReply({
+        message: "Halo, apa yang bisa kamu bantu?",
+        history: [],
+        products: [],
+        sections: [],
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(r.source).toBe("fallback");
+      expect(r.fallbackReason).toBe("direct");
+      expect(r.reply).toContain("Mendung Tirta");
+      expect(r.reply.length).toBeGreaterThan(20);
+    } finally {
+      vi.unstubAllGlobals();
+      process.env.AI_API_KEY = prev.key;
+      process.env.AI_BASE_URL = prev.base;
+    }
+  });
+
+  it("streamReply — SSE provider → delta mengalir, marker dibersihkan, done final", async () => {
+    const chunk = (text: string): string =>
+      `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`;
+    // Sengaja potong marker di tengah antar-chunk → sanitizer harus menahannya
+    // sehingga penampil TIDAK PERNAH memperlihatkan "[produk:…]" mentah.
+    const sse =
+      chunk("Stok Ikan Kerapu saat ini 4. [pro") +
+      chunk(`duk:${kerapu.id}] Utamakan yang segar.`) +
+      "data: [DONE]\n\n";
+    const encoder = new TextEncoder();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(c) {
+                c.enqueue(encoder.encode(sse.slice(0, 40)));
+                c.enqueue(encoder.encode(sse.slice(40)));
+                c.close();
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } },
+          ),
+      ),
+    );
+    const prev = { key: process.env.AI_API_KEY, base: process.env.AI_BASE_URL };
+    process.env.AI_API_KEY = "nvapi-test";
+    process.env.AI_BASE_URL = "https://example.invalid/v1";
+    try {
+      const deltas: string[] = [];
+      let final: { type: "done" | "failed"; result: AiChatResult } | null = null;
+      for await (const ev of streamReply({
+        message: "Ceritakan soal stok ikan kerapu untuk pembeli",
+        history: [],
+        products: [kerapu],
+        sections: [],
+      })) {
+        if (ev.type === "delta") deltas.push(ev.text);
+        else final = ev;
+      }
+      // Tidak ada delta yang memperlihatkan marker mentah.
+      expect(deltas.join("")).not.toContain("[produk:");
+      expect(deltas.length).toBeGreaterThan(0);
+      expect(final?.type).toBe("done");
+      expect(final?.result.source).toBe("ai");
+      expect(final?.result.reply).toContain("Stok Ikan Kerapu saat ini 4.");
+      expect(final?.result.reply).not.toContain("[produk:");
+      expect(final?.result.products.map((p) => p.id)).toEqual([kerapu.id]);
+    } finally {
+      vi.unstubAllGlobals();
+      process.env.AI_API_KEY = prev.key;
+      process.env.AI_BASE_URL = prev.base;
+    }
+  });
+
+  it("streamReply — provider 401 → SATU percobaan lalu event failed (fallback)", async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response('{"error":"unauthorized"}', {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    const prev = { key: process.env.AI_API_KEY, base: process.env.AI_BASE_URL };
+    process.env.AI_API_KEY = "nvapi-test-tidak-valid";
+    process.env.AI_BASE_URL = "https://example.invalid/v1";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      let final: { type: "done" | "failed"; result: AiChatResult } | null = null;
+      for await (const ev of streamReply({
+        message: "Apa saja produk yang dijual di sini?",
+        history: [],
+        products: [],
+        sections: [catalogSection],
+      })) {
+        if (ev.type !== "delta") final = ev;
+      }
+      // 4xx TIDAK di-retry (percobaan ulang tidak akan memperbaiki key).
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(final?.type).toBe("failed");
+      expect(final?.result.source).toBe("fallback");
+      expect(final?.result.fallbackReason).toBe("provider-error");
+      const logged = warn.mock.calls.flat().join(" ");
+      expect(logged).not.toContain("nvapi-test-tidak-valid");
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+      process.env.AI_API_KEY = prev.key;
+      process.env.AI_BASE_URL = prev.base;
+    }
+  });
+
+  it("streamReply — pertanyaan berdata → SATU event done instan tanpa provider", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("provider tidak boleh dipanggil untuk jalur direct");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const events: { type: "done" | "failed"; result: AiChatResult }[] = [];
+      for await (const ev of streamReply({
+        message: "Berapa jumlah penjual?",
+        history: [],
+        products: [],
+        sections: [countSection],
+      })) {
+        if (ev.type !== "delta") events.push(ev);
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(events).toHaveLength(1);
+      expect(events[0].type).toBe("done");
+      expect(events[0].result?.fallbackReason).toBe("direct");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Routing cerdas: deteksi sapaan (tanpa AI)                          */
+/* ------------------------------------------------------------------ */
+
+describe("isGreetingMessage — sapaan/percakapan ringan", () => {
+  it("sapaan murni & smalltalk asisten → true", () => {
+    expect(isGreetingMessage("Halo")).toBe(true);
+    expect(isGreetingMessage("hai")).toBe(true);
+    expect(isGreetingMessage("Hi!")).toBe(true);
+    expect(isGreetingMessage("Selamat pagi")).toBe(true);
+    expect(isGreetingMessage("Halo, apa yang bisa kamu bantu?")).toBe(true);
+    expect(isGreetingMessage("apa kabar?")).toBe(true);
+    expect(isGreetingMessage("siapa kamu")).toBe(true);
+    expect(isGreetingMessage("Terima kasih")).toBe(true);
+    expect(isGreetingMessage("makasih banyak")).toBe(true);
+  });
+
+  it("pertanyaan berdata / umum → BUKAN sapaan (tetap ke jalur yang tepat)", () => {
+    expect(isGreetingMessage("Halo, berapa jumlah penjual?")).toBe(false);
+    expect(isGreetingMessage("Mengapa ikan laut kaya omega-3?")).toBe(false);
+    expect(isGreetingMessage("Berapa stok ikan kerapu?")).toBe(false);
+    expect(isGreetingMessage("")).toBe(false);
+    expect(isGreetingMessage("halusinasi ikan laut")).toBe(false);
   });
 });
 

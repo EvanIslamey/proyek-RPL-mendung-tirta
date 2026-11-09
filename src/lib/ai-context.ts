@@ -18,6 +18,7 @@ Prinsip keamanan (A3/A4):
 
 import { Prisma } from "../../prisma/generated/client";
 import { prisma } from "./prisma";
+import { cached } from "./ai-cache";
 import {
   searchCatalog,
   findFocusProducts,
@@ -441,18 +442,21 @@ async function fetchSales(user: SafeUser): Promise<ContextSection | null> {
 async function fetchStats(user: SafeUser): Promise<ContextSection | null> {
   if (user.role !== "ADMIN") return null;
 
-  const [users, products, orders, paidAgg, lowStock] = await Promise.all([
-    prisma.user.groupBy({ by: ["role"], _count: true }),
-    prisma.product.groupBy({ by: ["status"], _count: true }),
-    prisma.order.groupBy({ by: ["status"], _count: true }),
-    prisma.order.aggregate({
-      where: { status: { in: ["PROCESSING", "SHIPPED", "READY_FOR_PICKUP", "COMPLETED"] } },
-      _sum: { total: true },
-    }),
-    prisma.product.count({
-      where: { stock: { lte: stockAlertThreshold() }, status: "AVAILABLE" },
-    }),
-  ]);
+  // Agregat global relatif stabil → cache 30 dtk (invalidasi route mutasi).
+  const [users, products, orders, paidAgg, lowStock] = await cached("stats:admin", () =>
+    Promise.all([
+      prisma.user.groupBy({ by: ["role"], _count: true }),
+      prisma.product.groupBy({ by: ["status"], _count: true }),
+      prisma.order.groupBy({ by: ["status"], _count: true }),
+      prisma.order.aggregate({
+        where: { status: { in: ["PROCESSING", "SHIPPED", "READY_FOR_PICKUP", "COMPLETED"] } },
+        _sum: { total: true },
+      }),
+      prisma.product.count({
+        where: { stock: { lte: stockAlertThreshold() }, status: "AVAILABLE" },
+      }),
+    ]),
+  );
 
   const fmt = (rows: { status?: string; role?: string; _count: number }[], label: string) =>
     rows.length === 0
@@ -493,7 +497,10 @@ async function fetchStats(user: SafeUser): Promise<ContextSection | null> {
  * Jumlah pembeli/pengguna adalah data internal → hanya admin (fetchStats).
  */
 async function fetchMarketReach(user: SafeUser, message: string): Promise<ContextSection> {
-  const activeStores = await prisma.store.count({ where: { isActive: true } });
+  const activeStores = await cached(
+    `market-reach:${message.toLowerCase().replace(/\s+/g, " ").slice(0, 120)}`,
+    () => prisma.store.count({ where: { isActive: true } }),
+  );
   const asksBuyer = /pembeli|buyer/.test(message.toLowerCase());
 
   const lines = [
@@ -677,7 +684,12 @@ async function fetchCountSection(
   kind: CountKind,
   message: string,
 ): Promise<ContextSection> {
-  const value = await queryCountData(user, kind, message);
+  // Hitungan relatif stabil + sudah discoping peran → cache 30 dtk per
+  // (user, jenis, bentuk pertanyaan); invalidasi saat ada mutasi data.
+  const value = await cached(
+    `count:${user.id}:${kind}:${message.toLowerCase().replace(/\s+/g, " ").slice(0, 120)}`,
+    () => queryCountData(user, kind, message),
+  );
   const label: Record<CountKind, string> = {
     seller: "penjual",
     buyer: "pembeli",
@@ -727,10 +739,12 @@ async function fetchFilteredCountSection(
   kind: CountKind,
   filters: ProductFilter,
 ): Promise<ContextSection> {
-  const n = await countCatalog(filters, {
-    onlyAvailable: kind === "availableProducts",
-    outOfStock: kind === "outOfStockProducts",
-  });
+  const n = await cached(`fcount:${kind}:${JSON.stringify(filters)}`, () =>
+    countCatalog(filters, {
+      onlyAvailable: kind === "availableProducts",
+      outOfStock: kind === "outOfStockProducts",
+    }),
+  );
   const subj = filters.subject
     ? ` ${filters.subject.phrase}`
     : filters.category
@@ -921,17 +935,19 @@ async function fetchOutOfStock(user: SafeUser, message: string): Promise<Context
  * aktif. Definisi "tersedia" sama persis dengan pencarian katalog.
  */
 async function fetchCatalogSummary(): Promise<ContextSection> {
-  const [total, available, unavailable, hidden] = await Promise.all([
-    prisma.product.count({ where: { status: { not: "HIDDEN" } } }),
-    prisma.product.count({ where: { status: "AVAILABLE", stock: { gt: 0 } } }),
-    prisma.product.count({
-      where: {
-        status: { not: "HIDDEN" },
-        OR: [{ status: "OUT_OF_STOCK" }, { stock: { lte: 0 } }],
-      },
-    }),
-    prisma.product.count({ where: { status: "HIDDEN" } }),
-  ]);
+  const [total, available, unavailable, hidden] = await cached("catalog-summary", () =>
+    Promise.all([
+      prisma.product.count({ where: { status: { not: "HIDDEN" } } }),
+      prisma.product.count({ where: { status: "AVAILABLE", stock: { gt: 0 } } }),
+      prisma.product.count({
+        where: {
+          status: { not: "HIDDEN" },
+          OR: [{ status: "OUT_OF_STOCK" }, { stock: { lte: 0 } }],
+        },
+      }),
+      prisma.product.count({ where: { status: "HIDDEN" } }),
+    ]),
+  );
 
   const lines = [
     `Total produk non-hidden: ${total}`,
@@ -961,16 +977,18 @@ async function fetchStores(keywords: string[]): Promise<ContextSection | null> {
     { location: { contains: kw, mode: "insensitive" as const } },
   ]);
 
-  const stores = await prisma.store.findMany({
-    where: { isActive: true, OR: orClauses },
-    take: 5,
-    select: {
-      storeName: true,
-      location: true,
-      description: true,
-      _count: { select: { products: true } },
-    },
-  });
+  const stores = await cached(`stores:${JSON.stringify(keywords)}`, () =>
+    prisma.store.findMany({
+      where: { isActive: true, OR: orClauses },
+      take: 5,
+      select: {
+        storeName: true,
+        location: true,
+        description: true,
+        _count: { select: { products: true } },
+      },
+    }),
+  );
   if (stores.length === 0) return null;
 
   const text = stores

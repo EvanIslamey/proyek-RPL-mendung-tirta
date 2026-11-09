@@ -1,6 +1,12 @@
 import type { NextRequest } from "next/server";
 import { requireUser } from "@/lib/auth";
-import { generateReply, type AiChatMessage } from "@/lib/ai";
+import {
+  generateReply,
+  streamReply,
+  type AiChatMessage,
+  type AiChatOpts,
+  type AiStreamEvent,
+} from "@/lib/ai";
 import { buildChatContext } from "@/lib/ai-context";
 import { hitRateLimit } from "@/lib/rate-limit";
 import { ApiError, assertSameOrigin, parseJsonBody } from "@/lib/validate";
@@ -9,10 +15,17 @@ import { ApiError, assertSameOrigin, parseJsonBody } from "@/lib/validate";
  * POST /api/ai/chat — asisten AI berbasis data aktual (wajib login, key hanya di backend).
  *
  * Alur: sesi login → rate limit → buildChatContext (query terkini, discoping
- * peran dari sesi, bukan dari body request) → generateReply (AI / fallback).
+ * peran dari sesi, bukan dari body request) → putuskan jalur (planReply di
+ * dalam generateReply/streamReply):
+ * - pertanyaan ber-data/sapaan/filter → JSON biasa, INSTAN (tanpa AI);
+ * - pertanyaan umum + body `stream:true` → SSE (`text/event-stream`):
+ *   event `{"type":"delta"}` → `{"type":"done"|"failed","result":{…}}`.
  *
- * Body: { message: string, history?: { role, content }[] }
+ * Setiap tahap dicatat `[ai-timing]` agar bottleneck mudah ditemukan.
+ *
+ * Body: { message: string, history?: { role, content }[], stream?: boolean }
  * Response: { reply, products[], sources[], generatedAt, source: "ai" | "fallback" }
+ *           atau stream SSE (bila stream:true & jalur AI).
  */
 export async function POST(request: NextRequest) {
   try {
@@ -33,6 +46,7 @@ export async function POST(request: NextRequest) {
     if (message.length < 1 || message.length > 1000) {
       throw new ApiError(400, "Pesan harus 1–1000 karakter.");
     }
+    const wantStream = body.stream === true;
 
     let history: AiChatMessage[] = [];
     const contextProductIds: string[] = [];
@@ -76,6 +90,8 @@ export async function POST(request: NextRequest) {
         });
     }
 
+    const t0 = performance.now();
+
     // 1. Grounding: query terkini dari DB, discoping peran sesi login.
     let context;
     try {
@@ -98,10 +114,11 @@ export async function POST(request: NextRequest) {
         source: "fallback",
       });
     }
+    const ctxMs = Math.round(performance.now() - t0);
 
-    // 2. Balasan (AI bila provider berhasil, fallback berbasis data bila tidak).
-    //    filters = filter FINAL dari konteks (termasuk subjek hasil resolve/retensi).
-    const result = await generateReply({
+    // Opsi balasan — keputusan jalur (direct/AI) ada di dalam planReply,
+    // sehingga mode JSON dan streaming tidak pernah berbeda jawabannya.
+    const chatOpts: AiChatOpts = {
       message,
       history,
       products: context.products,
@@ -112,8 +129,93 @@ export async function POST(request: NextRequest) {
       ambiguousFollowUp: context.ambiguousFollowUp,
       filters: context.filters,
       subjectAmbiguity: context.subjectAmbiguity,
-    });
+    };
 
+    // 2a. Streaming (SSE) — hanya bila diminta; jalur tetap menentukan sendiri.
+    if (wantStream) {
+      const clientCtl = new AbortController();
+      const onAbort = () => clientCtl.abort();
+      if (request.signal.aborted) clientCtl.abort();
+      else request.signal.addEventListener("abort", onAbort, { once: true });
+
+      const encoder = new TextEncoder();
+      let finalLabel = "belum-selesai";
+      const sse = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          try {
+            for await (const ev of streamReply(chatOpts, clientCtl.signal)) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
+              if (ev.type !== "delta") {
+                const r = (ev as Extract<AiStreamEvent, { type: "done" | "failed" }>).result;
+                finalLabel = `${ev.type}/${r.source}${r.fallbackReason ? `:${r.fallbackReason}` : ""}`;
+              }
+            }
+          } catch (err) {
+            // Kegagalan tak terduga di tengah stream → tutup dengan jawaban
+            // jujur agar client tidak menggantung tanpa respons.
+            console.error(
+              "[api/ai/chat] stream gagal:",
+              err instanceof Error ? `${err.name}: ${err.message}` : err,
+            );
+            try {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: "failed",
+                    result: {
+                      reply:
+                        "Maaf, terjadi kesalahan saat menyusun jawaban. Silakan coba lagi.",
+                      products: [],
+                      sources: [],
+                      generatedAt: new Date().toISOString(),
+                      source: "fallback",
+                      fallbackReason: "provider-error",
+                    },
+                  })}\n\n`,
+                ),
+              );
+              finalLabel = "stream-error";
+            } catch {
+              /* controller sudah ditutup client */
+            }
+          } finally {
+            request.signal.removeEventListener("abort", onAbort);
+            try {
+              controller.close();
+            } catch {
+              /* sudah tertutup */
+            }
+            console.log(
+              `[ai-timing] ctx=${ctxMs}ms total=${Math.round(performance.now() - t0)}ms ` +
+                `path=stream ${finalLabel}`,
+            );
+          }
+        },
+        cancel() {
+          // Client berhenti membaca (tutup tab / tombol berhenti) → batalkan
+          // provider agar tidak membuang token.
+          clientCtl.abort();
+          request.signal.removeEventListener("abort", onAbort);
+        },
+      });
+
+      return new Response(sse, {
+        headers: {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+          "X-Accel-Buffering": "no",
+        },
+      });
+    }
+
+    // 2b. JSON biasa (jalur direct instan / suite & skrip lama).
+    const result = await generateReply(chatOpts);
+    console.log(
+      `[ai-timing] ctx=${ctxMs}ms total=${Math.round(performance.now() - t0)}ms ` +
+        `path=json source=${result.source}${result.fallbackReason ? `:${result.fallbackReason}` : ""} ` +
+        `chars=${result.reply.length}`,
+    );
     return Response.json(result);
   } catch (e) {
     if (e instanceof ApiError) {

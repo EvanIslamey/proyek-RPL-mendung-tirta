@@ -133,6 +133,50 @@
   color: #b91c1c;
 }
 
+/* Indikator "Sedang berpikir…" — animasi titik ringan (bukan blocking) */
+.ai-dots {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 2px;
+}
+
+.ai-dots i {
+  font-style: normal;
+  animation: ai-dot-blink 1.2s infinite both;
+}
+
+.ai-dots i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.ai-dots i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes ai-dot-blink {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+  }
+  30% {
+    opacity: 1;
+  }
+}
+
+/* Tombol Berhenti (menggantikan Kirim saat memproses) */
+.ai-stop {
+  border: 1px solid var(--border-color, #e5e7eb);
+  background: var(--bg-color, #f9fafb);
+  color: var(--text-main, #1f2937);
+  cursor: pointer;
+}
+
+.ai-stop:hover {
+  border-color: #b45309;
+  color: #b45309;
+}
+
 .ai-note {
   display: block;
   margin-top: 0.4rem;

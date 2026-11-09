@@ -24,7 +24,7 @@ type ChatMessage = {
   sources?: { label: string; asOf: string }[];
   source?: "ai" | "fallback";
   /** Alasan fallback dari backend — untuk catatan UI yang jujur. */
-  fallbackReason?: "no-ai-config" | "filtered" | "provider-error";
+  fallbackReason?: "no-ai-config" | "filtered" | "provider-error" | "direct";
   error?: boolean;
 };
 
@@ -35,6 +35,21 @@ const GREETING: ChatMessage = {
     "Halo! 👋 Saya asisten belanja Mendung Tirta. Mau cari apa hari ini? " +
     'Coba tulis misalnya "joran untuk pemula" atau "ikan segar hari ini".',
 };
+
+/** Event penutup stream SSE dari /api/ai/chat. */
+type FinalEvent = {
+  type: "done" | "failed";
+  result: {
+    reply?: string;
+    products?: Product[];
+    sources?: { label: string; asOf: string }[];
+    source?: "ai" | "fallback";
+    fallbackReason?: ChatMessage["fallbackReason"];
+  };
+};
+
+/** Bentuk mentah satu event SSE hasil JSON.parse (belum tervalidasi). */
+type ParsedEvent = { type?: unknown; text?: unknown; result?: unknown };
 
 /** Sembunyikan hanya di halaman autentikasi — di semua halaman lain (termasuk
  *  dashboard seller/admin setelah login) chatbot tetap tersedia (Bagian 3). */
@@ -101,9 +116,16 @@ export function AIWidget() {
   const [messages, setMessages] = useState<ChatMessage[]>([GREETING]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  /** Indikator "Sedang berpikir…" tampil sampai delta/jawaban pertama tiba. */
+  const [thinking, setThinking] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const nextId = useRef(1);
+  /** Pembatal streaming (tombol Berhenti / ganti akun / unmount). */
+  const abortRef = useRef<AbortController | null>(null);
+  /** Id akun TERBARU — untuk memastikan stream lama tidak menulis ke sesi akun baru. */
+  const userIdRef = useRef<string | null>(null);
+  userIdRef.current = userId;
   // Id akun yang konteksnya sedang aktif di sesi ini (undefined = belum pernah).
   const [trackedUserId, setTrackedUserId] = useState<string | null | undefined>(undefined);
 
@@ -133,6 +155,12 @@ export function AIWidget() {
     if (userId && messages.length > 0) saveStoredMessages(userId, messages);
   }, [userId, messages]);
 
+  // Ganti akun / logout / unmount → batalkan streaming yang sedang berjalan
+  // agar jawaban lama tidak bocor ke sesi akun baru (reset percakapan).
+  useEffect(() => {
+    return () => abortRef.current?.abort();
+  }, [userId]);
+
   useEffect(() => {
     if (open) {
       scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -155,6 +183,9 @@ export function AIWidget() {
     const message = input.trim();
     if (!message || busy) return;
 
+    const sendUserId = userId; // akun saat pesan dikirim
+    const sameAccount = (): boolean => userIdRef.current === sendUserId;
+
     const history = messages
       .filter((m) => !m.error)
       .map((m) => ({
@@ -172,35 +203,35 @@ export function AIWidget() {
     setMessages((prev) => appendMessage(prev, { id: userIdMsg, role: "user", text: message }));
     setInput("");
     setBusy(true);
+    setThinking(true);
 
-    try {
-      const res = await fetch("/api/ai/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, history: history.slice(-8) }),
+    const ctl = new AbortController();
+    abortRef.current = ctl;
+    /** Teks streaming sejauh ini — dipertahankan bila koneksi putus. */
+    let streamed = "";
+
+    /** Tambah/ubah pesan asisten (id assistantId) — abaikan bila akun berganti. */
+    const upsertAssistant = (text: string): void => {
+      if (!sameAccount()) return;
+      streamed = text;
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === assistantId);
+        if (idx === -1) return appendMessage(prev, { id: assistantId, role: "assistant", text });
+        return prev.map((m) => (m.id === assistantId ? { ...m, text } : m));
       });
-      const data: {
-        reply?: string;
-        products?: Product[];
-        sources?: { label: string; asOf: string }[];
-        source?: "ai" | "fallback";
-        fallbackReason?: ChatMessage["fallbackReason"];
-        message?: string;
-      } = await res.json().catch(() => ({}));
+    };
 
-      if (!res.ok) {
-        const text =
-          res.status === 401
-            ? "Silakan masuk terlebih dahulu untuk memakai asisten."
-            : (data.message ?? "Maaf, terjadi kesalahan. Coba lagi.");
-        setMessages((prev) =>
-          appendMessage(prev, { id: assistantId, role: "assistant", text, error: true }),
-        );
-        return;
-      }
-
-      setMessages((prev) =>
-        appendMessage(prev, {
+    /** Finalkan jawaban (event done/failed atau JSON) — ganti bila sudah ada. */
+    const finalize = (data: {
+      reply?: string;
+      products?: Product[];
+      sources?: { label: string; asOf: string }[];
+      source?: "ai" | "fallback";
+      fallbackReason?: ChatMessage["fallbackReason"];
+    }): void => {
+      if (!sameAccount()) return;
+      setMessages((prev) => {
+        const final: ChatMessage = {
           id: assistantId,
           role: "assistant",
           text: data.reply ?? "Maaf, saya belum bisa menjawab.",
@@ -208,19 +239,124 @@ export function AIWidget() {
           sources: data.sources,
           source: data.source,
           fallbackReason: data.fallbackReason,
-        }),
-      );
+        };
+        const idx = prev.findIndex((m) => m.id === assistantId);
+        if (idx === -1) return appendMessage(prev, final);
+        return prev.map((m) => (m.id === assistantId ? final : m));
+      });
+    };
+
+    try {
+      const res = await fetch("/api/ai/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, history: history.slice(-8), stream: true }),
+        signal: ctl.signal,
+      });
+
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { message?: string };
+        const text =
+          res.status === 401
+            ? "Silakan masuk terlebih dahulu untuk memakai asisten."
+            : (data.message ?? "Maaf, terjadi kesalahan. Coba lagi.");
+        if (sameAccount()) {
+          setMessages((prev) =>
+            appendMessage(prev, { id: assistantId, role: "assistant", text, error: true }),
+          );
+        }
+        return;
+      }
+
+      const ctype = res.headers.get("content-type") ?? "";
+      if (ctype.includes("text/event-stream") && res.body) {
+        // Jalur streaming: pesan user sudah tampil & teks jawaban mengalir
+        // bertahap; event "done"/"failed" mengganti teks parsial dengan
+        // jawaban final tervalidasi (marker [produk:id] dibersihkan backend).
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        let final: FinalEvent | null = null;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let nl: number;
+          while ((nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 1);
+            if (!line.startsWith("data:")) continue;
+            let ev: ParsedEvent;
+            try {
+              ev = JSON.parse(line.slice(5)) as ParsedEvent;
+            } catch {
+              continue;
+            }
+            if (!ev || typeof ev !== "object") continue;
+            if (ev.type === "delta" && typeof ev.text === "string") {
+              setThinking(false);
+              upsertAssistant(streamed + ev.text);
+            } else if (
+              (ev.type === "done" || ev.type === "failed") &&
+              ev.result &&
+              typeof ev.result === "object"
+            ) {
+              final = ev as unknown as FinalEvent;
+            }
+          }
+        }
+        if (final) {
+          setThinking(false);
+          finalize(final.result);
+        } else if (streamed) {
+          // Koneksi putus di tengah jawaban → pertahankan parsial + tanda jujur.
+          setThinking(false);
+          if (sameAccount()) {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId ? { ...m, text: streamed, error: true } : m,
+              ),
+            );
+          }
+        } else {
+          throw new Error("stream berakhir tanpa jawaban");
+        }
+      } else {
+        // Jalur JSON: jawaban langsung/fallback dari backend (instan).
+        const data = await res.json().catch(() => ({}));
+        setThinking(false);
+        finalize(data);
+      }
     } catch {
-      setMessages((prev) =>
-        appendMessage(prev, {
-          id: assistantId,
-          role: "assistant",
-          text: "Tidak dapat terhubung ke server. Periksa koneksi Anda.",
-          error: true,
-        }),
-      );
+      setThinking(false);
+      if (ctl.signal.aborted) {
+        // Dihentikan user (tombol Berhenti) atau akun berganti: pertahankan
+        // teks parsial bila ada; beri catatan singkat bila belum ada jawaban.
+        if (sameAccount() && !streamed) {
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === assistantId)) return prev;
+            return appendMessage(prev, {
+              id: assistantId,
+              role: "assistant",
+              text: "⏹ Respons dihentikan.",
+            });
+          });
+        }
+      } else if (sameAccount()) {
+        setMessages((prev) =>
+          appendMessage(prev, {
+            id: assistantId,
+            role: "assistant",
+            text: "Tidak dapat terhubung ke server. Periksa koneksi Anda.",
+            error: true,
+          }),
+        );
+      }
+      // Akun berganti di tengah koneksi → jangan tulis apa pun ke sesi baru.
     } finally {
+      if (abortRef.current === ctl) abortRef.current = null;
       setBusy(false);
+      setThinking(false);
     }
   }
 
@@ -232,6 +368,8 @@ export function AIWidget() {
         return "AI sementara tidak tersedia — jawaban diambil dari data database terkini. Penyebabnya sudah dicatat di server.";
       case "filtered":
         return "Disusun langsung dari data database terkini (query terfilter).";
+      case "direct":
+        return "Jawaban cepat disusun langsung dari data aplikasi — tanpa menunggu AI.";
       case "no-ai-config":
         return "Mode katalog — jawaban dari data database terkini (AI belum dikonfigurasi).";
       default:
@@ -308,9 +446,16 @@ export function AIWidget() {
               </div>
             ))}
 
-            {busy && (
+            {busy && thinking && (
               <div className="ai-msg ai-msg-assistant" aria-busy="true">
-                <p className="ai-msg-text">Mengetik…</p>
+                <p className="ai-msg-text">
+                  Sedang berpikir
+                  <span className="ai-dots" aria-hidden="true">
+                    <i>.</i>
+                    <i>.</i>
+                    <i>.</i>
+                  </span>
+                </p>
               </div>
             )}
           </div>
@@ -325,9 +470,24 @@ export function AIWidget() {
               maxLength={1000}
               aria-label="Pesan untuk asisten"
             />
-            <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !input.trim()}>
-              Kirim
-            </button>
+            {busy ? (
+              <button
+                type="button"
+                className="btn btn-sm ai-stop"
+                onClick={() => abortRef.current?.abort()}
+                aria-label="Hentikan respons asisten"
+              >
+                Berhenti
+              </button>
+            ) : (
+              <button
+                type="submit"
+                className="btn btn-primary btn-sm"
+                disabled={!input.trim()}
+              >
+                Kirim
+              </button>
+            )}
           </form>
         </section>
       )}

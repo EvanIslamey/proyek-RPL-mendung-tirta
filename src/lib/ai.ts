@@ -17,7 +17,8 @@ import {
   Prisma
 } from "../../prisma/generated/client";
 import { prisma } from "./prisma";
-import { resolveAiRuntime } from "./integrations";
+import { resolveAiRuntime, type AiRuntime } from "./integrations";
+import { cached } from "./ai-cache";
 import type { ContextSection } from "./ai-context";
 
 const STOPWORDS = new Set([
@@ -505,8 +506,11 @@ export function filterProductsByPrice(products: AiProduct[], filter: PriceFilter
  *                     (by design, bukan kegagalan provider).
  * - "provider-error": AI SUDAH dikonfigurasi tapi provider gagal/timeout/
  *                     jawaban kosong → tampilkan pemberitahuan jelas.
+ * - "direct"        : pertanyaan terjawab penuh oleh data grounding
+ *                     (hitungan/akun/pesanan/fokus produk/sapaan) → AI
+ *                     TIDAK dipanggil sama sekali (respons instan).
  */
-export type FallbackReason = "no-ai-config" | "filtered" | "provider-error";
+export type FallbackReason = "no-ai-config" | "filtered" | "provider-error" | "direct";
 
 export type AiChatResult = {
   reply: string;
@@ -580,6 +584,15 @@ function filterConds(pf: ProductFilter): Prisma.Sql[] {
 export async function searchCatalog(
   keywords: string[],
   filters?: ProductFilter | PriceFilter, // kompatibilitas mundur
+): Promise<AiProduct[]> {
+  // Data katalog relatif stabil → cache 30 dtk (invalidasi dari route mutasi).
+  const key = `catalog:${JSON.stringify([keywords, filters ?? null])}`;
+  return cached(key, () => searchCatalogRaw(keywords, filters));
+}
+
+async function searchCatalogRaw(
+  keywords: string[],
+  filters?: ProductFilter | PriceFilter,
 ): Promise<AiProduct[]> {
   // Deteksi tipe: jika hanya ada min/max → PriceFilter lama, jika ada field lain → ProductFilter
   const isLegacyPriceFilter = filters && "min" in filters && !("category" in filters);
@@ -997,6 +1010,15 @@ function focusedReply(p: AiProduct, message: string): string {
  * kategori/toko/rating) sebagai safety net — memastikan tidak ada produk yang
  * bocor keluar filter.
  */
+/** Pengurutan daftar fallback sesuai preferensi sortBy (bila ada).
+ * "newest" tidak dicompare — produk tidak membawa tanggal di tipe ringkas. */
+const FALLBACK_SORT: Record<string, (a: AiProduct, b: AiProduct) => number> = {
+  price_asc: (a, b) => a.price - b.price,
+  price_desc: (a, b) => b.price - a.price,
+  rating: (a, b) => b.rating - a.rating,
+  name: (a, b) => a.name.localeCompare(b.name, "id"),
+};
+
 export function fallbackResult(opts: {
   message: string;
   products: AiProduct[];
@@ -1046,6 +1068,12 @@ export function fallbackResult(opts: {
     ...opts.products,
     ...(opts.contextProducts ?? []).filter((c) => !opts.products.some((p) => p.id === c.id)),
   ]);
+
+  // Urutan daftar mengikuti preferensi user ("termurah" → harga naik, dst.) —
+  // penting saat daftar gabungan katalog + konteks riwayat agar produk pertama
+  // benar-benar yang sesuai diminta (mis. Q9 "Produk termurah.").
+  const sortFn = FALLBACK_SORT[opts.filters?.sortBy ?? ""];
+  if (sortFn) allProducts.sort(sortFn);
 
   // 1. Fokus satu produk — jawab spesifik, tanpa ringkasan katalog.
   if (opts.focus) {
@@ -1303,14 +1331,11 @@ export function fallbackResult(opts: {
   };
 }
 
-/**
- * Hasilkan balasan asisten: coba provider AI dulu, fallback ke konteks DB.
- * Tidak pernah melempar — kegagalannya sendiri jatuh ke fallback.
- * Error provider dicatat AMAN (hanya pesan & status — tanpa API key).
- */
-let noKeyLogged = false;
+/* ------------------------------------------------------------------ */
+/* Routing cerdas: jawaban langsung (tanpa AI) vs streaming AI         */
+/* ------------------------------------------------------------------ */
 
-export async function generateReply(opts: {
+export type AiChatOpts = {
   message: string;
   history: AiChatMessage[];
   products: AiProduct[];
@@ -1327,23 +1352,71 @@ export async function generateReply(opts: {
   filters?: ProductFilter;
   /** Frasa subjek ambigu antar kategori → konteks klarifikasi untuk AI & fallback. */
   subjectAmbiguity?: { phrase: string; options: string[] };
-}): Promise<AiChatResult> {
-  const generatedAt = new Date().toISOString();
-  const contextProducts = opts.contextProducts ?? [];
-  const focus = opts.focus ?? null;
-  const focusCandidates = opts.focusCandidates ?? [];
-  const fallback = (reason?: FallbackReason): AiChatResult => {
-    const r = fallbackResult({ ...opts, generatedAt });
-    return reason ? { ...r, fallbackReason: reason } : r;
-  };
+};
 
-  // Query BERFILTER (subjek/harga/kategori/toko/stok/rating) → jawaban
-  // DETERMINISTIK lewat komposer fallback: format stabil ("Menampilkan X
-  // produk yang cocok" / "tidak ada memenuhi filter"), daftar = hasil DB
-  // terfilter yang tervalidasi ulang, dan tanpa risiko halusinasi angka
-  // dari model (uji live: kepatuhan model terhadap format ternyata tidak
-  // konsisten). Pertanyaan non-filter tetap memakai jalur AI bila tersedia.
-  const hasActiveFilters = !!(
+/**
+ * Section yang jawabannya sudah LENGKAP dari data → tidak butuh AI
+ * (hitungan, pesanan, akun, statistik, ulasan, stok, toko, panduan).
+ * "catalog" sengaja TIDAK disertakan: ringkasan angka untuk pertanyaan
+ * umum (mis. "mengapa laut biru") lebih baik dijawab AI dengan konteks
+ * seperlunya.
+ */
+const DIRECT_SECTION_KEYS = new Set([
+  "count", "orders", "sales", "stats", "market", "account",
+  "appinfo", "reviews", "lowstock", "outofstock", "store",
+]);
+
+/** Sapaan/percakapan ringan — tanpa data, tanpa AI (jawab instan). */
+const GREETING_PREFIX_RE =
+  /^(?:halo+|hai+|hi+|hey+|hello+|pagi|siang|sore|malam|assalamualaikum|selamat\s+(?:pagi|siang|sore|malam))\b/i;
+const SMALLTALK_RE =
+  /^(?:apa\s+kabar|gimana\s+kabarnya|kabar\s+gimana|siapa\s+kamu|siapa\s+anda|kamu\s+siapa|anda\s+siapa|apa\s+yang\s+bisa\s+kamu\s+bantu|bisa\s+bantu\s+apa|bisa\s+apa|kamu\s+bisa\s+apa|ada\s+yang\s+bisa\s+dibantu|jelaskan\s+dirimu|perkenalkan\s+dirimu|aku\s+bisa\s+tanya\s+apa|apa\s+saja\s+yang\s+bisa\s+kamu\s+kerjakan|makasih|terima\s+kasih|trimakasih|thanks|thx)(?:\s+(?:banyak|ya|yaa|bro|mbak|mas|pak|bu|teman|semua|guys|sekalian))*[\s,.!?]*$/i;
+
+/**
+ * Deteksi murni (tanpa AI, bisa diuji unit): true untuk sapaan/percakapan
+ * ringan seperti "Halo", "Halo, apa yang bisa kamu bantu?", "Terima kasih".
+ * Pertanyaan ber-data ("Halo, berapa jumlah penjual?") BUKAN sapaan —
+ * bagian setelah kata sapaan harus kosong/smalltalk murni.
+ */
+export function isGreetingMessage(raw: string): boolean {
+  const m = raw.trim().toLowerCase().replace(/[?!.]+$/, "").trim();
+  if (!m || m.length > 80) return false;
+  const isGreet = GREETING_PREFIX_RE.test(m);
+  const rest = isGreet
+    ? m.replace(GREETING_PREFIX_RE, "").replace(/^[\s,.!\-:]+/, "").trim()
+    : m;
+  if (rest === "") return isGreet;
+  return SMALLTALK_RE.test(rest) || SMALLTALK_RE.test(m);
+}
+
+function greetingReply(message: string): string {
+  if (/makasih|terima\s*kasih|trimakasih|thanks|thx/i.test(message)) {
+    return "Sama-sama! 😊 Kalau ada yang ingin ditanyakan soal produk, harga, stok, atau status pesanan, saya siap membantu.";
+  }
+  return (
+    "Halo! 👋 Saya asisten belanja Mendung Tirta. Saya bisa bantu mencari produk, " +
+    "cek harga & stok, melihat status pesanan Anda, atau menanyakan jumlah penjual/pembeli " +
+    "— sesuai hak akses akun Anda. Mau mulai dari mana?"
+  );
+}
+
+/** True bila pertanyaan TERJAWAB PENUH oleh data grounding (tanpa AI).
+ * Catatan: keberadaan `products` SAJA tidak memaksa direct — pertanyaan
+ * katalog terbuka ("joran seperti apa yang bagus?") tetap boleh dijawab AI
+ * dengan KATALOG sebagai konteks (jawaban lebih alami + kartu produk tervalidasi);
+ * yang memaksa direct adalah data yang menjawab PERSIS: fokus produk, hitungan,
+ * akun/pesanan/statistik, klarifikasi, dan riwayat lanjutan. */
+function hasDirectData(opts: AiChatOpts): boolean {
+  if (opts.focus) return true;
+  if ((opts.focusCandidates?.length ?? 0) >= 2) return true;
+  if (opts.subjectAmbiguity) return true;
+  if (opts.ambiguousFollowUp) return true;
+  if ((opts.contextProducts?.length ?? 0) > 0) return true;
+  return opts.sections.some((s) => DIRECT_SECTION_KEYS.has(s.key));
+}
+
+function hasActiveFilter(opts: AiChatOpts): boolean {
+  return !!(
     opts.filters &&
     (opts.filters.price ||
       opts.filters.subject ||
@@ -1352,41 +1425,171 @@ export async function generateReply(opts: {
       opts.filters.inStock !== undefined ||
       opts.filters.minRating !== undefined)
   );
-  if (hasActiveFilters) {
-    return fallback("filtered");
+}
+
+type ReplyPlan =
+  | { kind: "static"; result: AiChatResult }
+  | {
+      kind: "ai";
+      runtime: AiRuntime;
+      messages: { role: "system" | "user" | "assistant"; content: string }[];
+      allProducts: AiProduct[];
+      makeFallback: (reason?: FallbackReason) => AiChatResult;
+      generatedAt: string;
+    };
+
+let noKeyLogged = false;
+
+/**
+ * Putuskan jalur respons SEBELUM memanggil provider — satu keputusan untuk
+ * SEMUA mode (JSON maupun streaming) sehingga tidak ada proses ganda:
+ * 1. filter aktif → deterministik ("filtered", urutan lama dipertahankan)
+ * 2. tanpa data + sapaan → jawaban ramah instan ("direct")
+ * 3. data grounding menjawab penuh → instan ("direct")
+ * 4. sisanya (pertanyaan umum) → jalur AI (butuh konfigurasi provider)
+ */
+async function planReply(opts: AiChatOpts): Promise<ReplyPlan> {
+  const generatedAt = new Date().toISOString();
+  const focus = opts.focus ?? null;
+  const focusCandidates = opts.focusCandidates ?? [];
+  const makeFallback = (reason?: FallbackReason): AiChatResult => {
+    const r = fallbackResult({ ...opts, generatedAt });
+    return reason ? { ...r, fallbackReason: reason } : r;
+  };
+
+  // 1. Query BERFILTER → deterministik: format stabil, tanpa risiko halusinasi.
+  if (hasActiveFilter(opts)) {
+    return { kind: "static", result: makeFallback("filtered") };
   }
 
-  // Union untuk validasi marker [produk:id] & label sumber katalog.
-  const allProducts: AiProduct[] = [];
-  for (const p of [...opts.products, ...contextProducts, ...(focus ? [focus] : []), ...focusCandidates]) {
-    if (!allProducts.some((x) => x.id === p.id)) allProducts.push(p);
+  // 2. Sapaan/percakapan ringan → jawab instan (tanpa AI & tanpa query).
+  const dataBasis = hasDirectData(opts);
+  if (!dataBasis && isGreetingMessage(opts.message)) {
+    return {
+      kind: "static",
+      result: {
+        reply: greetingReply(opts.message),
+        products: [],
+        sources: [],
+        generatedAt,
+        source: "fallback",
+        fallbackReason: "direct",
+      },
+    };
   }
 
-  // Baca konfigurasi AI: prioritas konfigurasi AKTIF di DB (admin) → env.
-  const aiRuntime = await resolveAiRuntime();
-  const apiKey = aiRuntime.apiKey;
-  if (!apiKey) {
+  // 3. Pertanyaan terjawab penuh oleh data grounding → instan, TANPA AI
+  //    (hitungan/akun/pesanan/fokus/stok/… — inilah penyebab lambat lama:
+  //    pertanyaan berdata sempat menunggu provider yang timeout 90 dtk).
+  if (dataBasis) {
+    return { kind: "static", result: makeFallback("direct") };
+  }
+
+  // 4. Baca konfigurasi AI: prioritas konfigurasi AKTIF di DB (admin) → env.
+  const runtime = await resolveAiRuntime();
+  if (!runtime.apiKey) {
     // Dicatat sekali — TANPA menampilkan key (kondisi: AI belum dikonfigurasi).
     if (!noKeyLogged) {
       noKeyLogged = true;
       console.info("[ai] AI_API_KEY belum dikonfigurasi — memakai jawaban fallback berbasis data.");
     }
-    return fallback("no-ai-config");
+    return { kind: "static", result: makeFallback("no-ai-config") };
   }
 
-  const baseUrl = aiRuntime.baseUrl;
-  const model = aiRuntime.model;
-  const timeoutMs = aiRuntime.timeoutMs;
+  // Union grounding untuk validasi marker [produk:id] & label sumber katalog.
+  const allProducts: AiProduct[] = [];
+  for (const p of [
+    ...opts.products,
+    ...(opts.contextProducts ?? []),
+    ...(focus ? [focus] : []),
+    ...focusCandidates,
+  ]) {
+    if (!allProducts.some((x) => x.id === p.id)) allProducts.push(p);
+  }
 
   const messages = [
     { role: "system" as const, content: SYSTEM_PROMPT },
     {
       role: "system" as const,
-      content: `DATA DARI DATABASE:\n${contextForPrompt(opts.sections, opts.products, contextProducts, focus, focusCandidates, opts.filters, opts.subjectAmbiguity)}`,
+      content: `DATA DARI DATABASE:\n${contextForPrompt(
+        opts.sections,
+        opts.products,
+        opts.contextProducts ?? [],
+        focus,
+        focusCandidates,
+        opts.filters,
+        opts.subjectAmbiguity,
+      )}`,
     },
     ...opts.history.slice(-8),
     { role: "user" as const, content: opts.message },
   ];
+
+  return { kind: "ai", runtime, messages, allProducts, makeFallback, generatedAt };
+}
+
+/** Bersihkan jawaban model: buang semua marker [produk:id] (id tak dikenal
+ * ikut dibuang) & rapikan baris kosong; id valid dicatat untuk kartu produk. */
+function cleanAiReply(
+  content: string,
+  allowed: Map<string, AiProduct>,
+  mentioned: string[],
+): string {
+  return content
+    .replace(/\[produk:([^\]]+)\]/g, (_m, id: string) => {
+      const clean = id.trim();
+      if (allowed.has(clean) && !mentioned.includes(clean)) mentioned.push(clean);
+      return ""; // id tidak dikenal → marker tetap dibersihkan
+    })
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** Penyaring marker untuk delta streaming: menahan teks yang bisa menjadi
+ * bagian marker "[produk:…]" sampai utuh lalu membuangnya — penampil tidak
+ * pernah memperlihatkan marker mentah. Jawaban FINAL dihitung dari teks
+ * penuh (cleanAiReply) sehingga output streaming = output JSON. */
+class MarkerSanitizer {
+  private pending = "";
+
+  push(chunk: string): string {
+    let buf = this.pending + chunk;
+    this.pending = "";
+    for (;;) {
+      const start = buf.indexOf("[produk:");
+      if (start === -1) {
+        // Tahan ekor yang merupakan awal marker parsial ("[pro", "[", …).
+        const open = buf.lastIndexOf("[");
+        if (open !== -1 && "[produk:".startsWith(buf.slice(open))) {
+          this.pending = buf.slice(open);
+          buf = buf.slice(0, open);
+        }
+        return buf.replace(/\n{3,}/g, "\n\n");
+      }
+      const end = buf.indexOf("]", start);
+      if (end === -1) {
+        // Marker belum utuh → tahan sampai "]" datang.
+        this.pending = buf.slice(start);
+        return buf.slice(0, start).replace(/\n{3,}/g, "\n\n");
+      }
+      buf = buf.slice(0, start) + buf.slice(end + 1);
+    }
+  }
+}
+
+/**
+ * Hasilkan balasan asisten (mode JSON — dipakai suite/scripts/unit test):
+ * keputusan jalur IDENTIK dengan streamReply; bila AI, provider dipanggil
+ * SEKALI tanpa streaming. Tidak pernah melempar — kegagalannya sendiri
+ * jatuh ke fallback. Error provider dicatat AMAN (tanpa API key).
+ */
+export async function generateReply(opts: AiChatOpts): Promise<AiChatResult> {
+  const plan = await planReply(opts);
+  if (plan.kind === "static") return plan.result;
+
+  const { runtime, messages, allProducts, makeFallback, generatedAt } = plan;
+  const apiKey = runtime.apiKey as string; // planReply menjamin terisi
+  const { baseUrl, model, timeoutMs } = runtime;
 
   try {
     const res = await fetch(`${baseUrl}/chat/completions`, {
@@ -1408,21 +1611,11 @@ export async function generateReply(opts: {
     // Validasi id produk terhadap grounding — buang karangan model.
     const allowed = new Map(allProducts.map((p) => [p.id, p]));
     const mentioned: string[] = [];
-    const reply = content
-      .replace(/\[produk:([^\]]+)\]/g, (_m, id: string) => {
-        const clean = id.trim();
-        if (allowed.has(clean) && !mentioned.includes(clean)) {
-          mentioned.push(clean);
-          return "";
-        }
-        return ""; // id tidak dikenal → marker tetap dibersihkan
-      })
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
+    const reply = cleanAiReply(content, allowed, mentioned);
 
     if (!reply) {
       console.warn(`[ai] provider ${model} mengembalikan jawaban kosong → fallback.`);
-      return fallback("provider-error");
+      return makeFallback("provider-error");
     }
     return {
       reply,
@@ -1436,6 +1629,193 @@ export async function generateReply(opts: {
     // lalu tampilkan jawaban fallback berbasis data.
     const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     console.warn(`[ai] provider ${model} gagal → fallback. ${detail}`);
-    return fallback("provider-error");
+    return makeFallback("provider-error");
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Streaming respons AI (SSE)                                          */
+/* ------------------------------------------------------------------ */
+
+export type AiStreamEvent =
+  | { type: "delta"; text: string }
+  | { type: "done"; result: AiChatResult }
+  | { type: "failed"; result: AiChatResult };
+
+/** Batas menunggu byte pertama provider — deteksi provider menggantung
+ * (bukan 90 dtk penuh seperti sebelumnya). Total tetap dibatasi AI_TIMEOUT_MS. */
+const FIRST_BYTE_TIMEOUT_MS = 20_000;
+const RETRY_DELAY_MS = 400;
+
+/** Retry wajar: HANYA error yang bisa membaik dengan percobaan ulang —
+ * HTTP 5xx atau error jaringan, dan itu pun sebelum delta pertama.
+ * Timeout/idle/4xx/pembatalan client TIDAK di-retry (langsung fallback). */
+function isRetryableProviderError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === "TimeoutError" || err.name === "AbortError") return false;
+  const status = (err as Error & { status?: number }).status;
+  if (typeof status === "number") return status >= 500 && status < 600;
+  return err instanceof TypeError; // fetch gagal jaringan (DNS/reset)
+}
+
+const waitRetry = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Streaming balasan AI — keputusan jalur IDENTIK dengan generateReply:
+ * - pertanyaan ber-data/sapaan/filter → SATU event "done" (tanpa provider);
+ * - pertanyaan umum → provider dipanggil `stream: true`, teks mengalir per
+ *   delta, lalu "done" (jawaban final tervalidasi & marker dibersihkan) atau
+ *   "failed" (provider gagal → fallback berbasis data; teks parsial DIGANTI
+ *   agar jawaban tidak terpotong di tengah kalimat).
+ * - client abort → pengiriman berhenti & provider ikut dibatalkan.
+ */
+export async function* streamReply(
+  opts: AiChatOpts,
+  clientSignal?: AbortSignal,
+): AsyncGenerator<AiStreamEvent> {
+  const t0 = Date.now();
+  const plan = await planReply(opts);
+  if (plan.kind === "static") {
+    yield { type: "done", result: plan.result };
+    return;
+  }
+
+  const { runtime, messages, allProducts, makeFallback, generatedAt } = plan;
+  const apiKey = runtime.apiKey as string; // planReply menjamin terisi
+  const { baseUrl, model, timeoutMs } = runtime;
+  const allowed = new Map(allProducts.map((p) => [p.id, p]));
+
+  let raw = "";
+  let emitted = false;
+  let streamCompleted = false;
+  let firstByteMs: number | null = null;
+  let lastErr: unknown = null;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await waitRetry(RETRY_DELAY_MS);
+    if (clientSignal?.aborted) break;
+    raw = "";
+    const sanitizer = new MarkerSanitizer();
+    const idleCtl = new AbortController();
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const armIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () => idleCtl.abort(new DOMException("provider idle (tanpa byte)", "TimeoutError")),
+        FIRST_BYTE_TIMEOUT_MS,
+      );
+    };
+    armIdle();
+    try {
+      const signal = AbortSignal.any(
+        [clientSignal, AbortSignal.timeout(timeoutMs), idleCtl.signal].filter(
+          Boolean,
+        ) as AbortSignal[],
+      );
+      const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ model, messages, temperature: 0.2, max_tokens: 1600, stream: true }),
+        signal,
+      });
+      armIdle(); // header diterima → penghitung byte pertama di-reset
+      if (!res.ok) {
+        const body = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 160);
+        const httpErr = new Error(
+          `provider HTTP ${res.status}${body ? ` — ${body}` : ""}`,
+        ) as Error & { status?: number };
+        httpErr.status = res.status;
+        throw httpErr;
+      }
+
+      const ctype = res.headers.get("content-type") ?? "";
+      if (!res.body || !ctype.includes("event-stream")) {
+        // Provider mengabaikan stream → jawab 1 delta dari JSON biasa.
+        const data = (await res.json()) as {
+          choices?: { message?: { content?: string } }[];
+        };
+        const content = data.choices?.[0]?.message?.content ?? "";
+        if (!content.trim()) throw new Error("provider mengembalikan jawaban kosong");
+        raw = content;
+        const text = sanitizer.push(content);
+        if (text) {
+          emitted = true;
+          yield { type: "delta", text };
+        }
+        streamCompleted = true;
+        break;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        armIdle();
+        if (firstByteMs === null) firstByteMs = Date.now() - t0;
+        buf += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          let ev: { choices?: { delta?: { content?: string } }[] };
+          try {
+            ev = JSON.parse(payload);
+          } catch {
+            continue;
+          }
+          const delta = ev?.choices?.[0]?.delta?.content;
+          if (delta) {
+            raw += delta;
+            const text = sanitizer.push(delta);
+            if (text) {
+              emitted = true;
+              yield { type: "delta", text };
+            }
+          }
+        }
+      }
+      streamCompleted = true;
+      break; // sukses
+    } catch (err) {
+      lastErr = err;
+      // Gagal di tengah stream (sudah ada delta) → jangan ulang (duplikat).
+      if (emitted || clientSignal?.aborted || !isRetryableProviderError(err)) break;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+    }
+  }
+
+  // Client berhenti membaca → jangan kirim apa pun (partial dikelola client).
+  if (clientSignal?.aborted) return;
+
+  const detail =
+    lastErr instanceof Error ? `${lastErr.name}: ${lastErr.message}` : lastErr ? String(lastErr) : "";
+
+  const mentioned: string[] = [];
+  const reply = streamCompleted && raw ? cleanAiReply(raw, allowed, mentioned) : "";
+  if (reply) {
+    console.log(
+      `[ai] stream ${model} ok: first=${firstByteMs ?? "-"}ms total=${Date.now() - t0}ms chars=${reply.length}`,
+    );
+    yield {
+      type: "done",
+      result: {
+        reply,
+        products: mentioned.map((id) => allowed.get(id)!).slice(0, 5),
+        sources: buildSources(opts.sections, allProducts, generatedAt),
+        generatedAt,
+        source: "ai",
+      },
+    };
+    return;
+  }
+
+  // Gagal total (timeout/5xx/jaringan/kosong/putus) → fallback data jujur.
+  console.warn(`[ai] stream ${model} gagal → fallback. ${detail || "jawaban kosong"}`);
+  yield { type: "failed", result: makeFallback("provider-error") };
 }

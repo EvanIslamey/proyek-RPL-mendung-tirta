@@ -94,6 +94,7 @@ model User {
 
   @@index([email])
   @@index([telegramChatId])
+  @@index([role]) // hitungan chatbot per peran (berapa penjual/pembeli/admin)
 }
 
 model Session {
@@ -126,6 +127,7 @@ model Store {
   products Product[]
 
   @@index([storeName])
+  @@index([isActive]) // filter toko aktif (katalog & jangkauan marketplace)
 }
 
 model Category {
@@ -161,6 +163,8 @@ model Product {
   @@index([storeId])
   @@index([categoryId])
   @@index([name])
+  @@index([status]) // visibilitas stok (katalog: status <> 'HIDDEN' dst.)
+  @@index([price])  // rentang & urutan harga (filter "di bawah 50000", termurah)
 }
 
 model Order {

@@ -143,8 +143,10 @@ function baseChecks(label: string, r: ChatResp): void {
     `dapat ${r.source}`,
   );
   if (r.source === "fallback") {
+    // "direct" = jalur jawaban cepat TANPA AI (routing cerdas: hitungan/
+    // akun/pesanan/fokus/sapaan dijawab langsung dari data) — bukan kegagalan.
     check(
-      ["no-ai-config", "filtered", "provider-error"].includes(
+      ["no-ai-config", "filtered", "provider-error", "direct"].includes(
         r.fallbackReason ?? "",
       ),
       `${label}: fallbackReason terisi`,
