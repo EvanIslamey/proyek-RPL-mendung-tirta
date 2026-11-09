@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Panel Pengaturan Telegram — halaman Informasi Diri (khusus Administrator).
+ * Panel Pengaturan Telegram — halaman Pengaturan Integrasi (khusus Administrator).
  *
  * - Konfigurasi Telegram GLOBAL aplikasi (scope ""), independen dari
  *   WhatsApp/Fonnte: menonaktifkan salah satu TIDAK memengaruhi lainnya.

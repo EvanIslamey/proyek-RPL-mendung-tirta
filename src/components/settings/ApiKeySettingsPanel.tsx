@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Panel Pengaturan API Key AI — untuk halaman Informasi Diri (hanya Admin).
+ * Panel Pengaturan API Key AI — untuk halaman Pengaturan Integrasi (hanya Admin).
  *
  * - Menyimpan API Key provider AI chatbot (OpenAI-compatible / NVIDIA NIM / ds.).
  * - Nilai API key TIDAK PERNAH dikirim utuh ke frontend (hanya hint tersamarkan).

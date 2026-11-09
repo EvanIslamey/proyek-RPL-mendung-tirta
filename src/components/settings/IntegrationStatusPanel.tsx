@@ -1,8 +1,9 @@
 "use client";
 
 /**
- * Panel "Status Koneksi & Riwayat Pengujian" — ringkasan kedua konfigurasi
- * (WhatsApp & API Key AI) di halaman Informasi Diri.
+ * Panel "Status Koneksi & Riwayat Pengujian" — ringkasan konfigurasi
+ * (WhatsApp & API Key AI): halaman Pengaturan Integrasi (Admin) dan
+ * Informasi Diri (Penjual).
  *
  * Untuk penjual, endpoint API Key akan menolak (403) dan barisnya disembunyikan.
  * Nilai rahasia tidak pernah ditampilkan — hanya status & waktu uji.

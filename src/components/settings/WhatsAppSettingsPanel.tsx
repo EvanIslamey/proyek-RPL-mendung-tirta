@@ -1,7 +1,8 @@
 "use client";
 
 /**
- * Panel Pengaturan WhatsApp (Fonnte) — halaman Informasi Diri (Admin & Penjual).
+ * Panel Pengaturan WhatsApp (Fonnte) — halaman Pengaturan Integrasi (Admin)
+ * & halaman Informasi Diri (Penjual, scope miliknya sendiri).
  *
  * - Admin mengelola konfigurasi WhatsApp GLOBAL aplikasi (+ penerima notifikasi
  *   operasional, prop `showOps`).

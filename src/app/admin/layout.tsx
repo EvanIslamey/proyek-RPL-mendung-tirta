@@ -23,6 +23,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
           <span className="dash-sidebar-title">Panel Admin</span>
           <DashNavLink href="/admin/dashboard">📊 Dashboard</DashNavLink>
           <DashNavLink href="/admin/profile">👤 Informasi Diri</DashNavLink>
+          <DashNavLink href="/admin/integrations">🔌 Pengaturan Integrasi</DashNavLink>
           <DashNavLink href="/admin/users">👥 Pengguna</DashNavLink>
           <DashNavLink href="/admin/stores">🏪 Toko</DashNavLink>
           <DashNavLink href="/admin/categories">🗂 Kategori</DashNavLink>

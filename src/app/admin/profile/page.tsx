@@ -4,11 +4,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/Toast";
 import { formatDateId } from "@/lib/format";
-import { WhatsAppSettingsPanel } from "@/components/settings/WhatsAppSettingsPanel";
 import { WhatsAppPreferencesPanel } from "@/components/settings/WhatsAppPreferencesPanel";
-import { TelegramSettingsPanel } from "@/components/settings/TelegramSettingsPanel";
-import { ApiKeySettingsPanel } from "@/components/settings/ApiKeySettingsPanel";
-import { IntegrationStatusPanel } from "@/components/settings/IntegrationStatusPanel";
 
 type Profile = {
   id: string;
@@ -317,25 +313,10 @@ export default function AdminProfilePage() {
             <dd>{profile?.orderCount ?? 0}</dd>
           </dl>
         </section>
-      </div>
 
-      {/* Bagian Pengaturan Integrasi — admin mengelola konfigurasi global. */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-          gap: "1.5rem",
-          alignItems: "start",
-          marginTop: "1.5rem",
-        }}
-      >
+        {/* Preferensi notifikasi pribadi (nomor WA profil & opt-in) — bukan
+            konfigurasi API. Konfigurasi integrasi pindah ke /admin/integrations. */}
         <WhatsAppPreferencesPanel />
-        <WhatsAppSettingsPanel showOps />
-        <TelegramSettingsPanel />
-        <ApiKeySettingsPanel />
-      </div>
-      <div style={{ marginTop: "1.5rem" }}>
-        <IntegrationStatusPanel />
       </div>
     </>
   );

@@ -1,5 +1,6 @@
-/* Panel Pengaturan Integrasi (WhatsApp & API Key) — halaman Informasi Diri.
-   Dipakai WhatsAppSettingsPanel & ApiKeySettingsPanel. */
+/* Panel Pengaturan Integrasi (WhatsApp, Telegram & API Key) — halaman
+   Pengaturan Integrasi (Admin) & Informasi Diri (Penjual).
+   Dipakai WhatsAppSettingsPanel, TelegramSettingsPanel & ApiKeySettingsPanel. */
 
 .status-badge {
   display: inline-block;
