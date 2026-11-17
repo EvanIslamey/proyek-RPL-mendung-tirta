@@ -3,9 +3,9 @@
  *
  * Desain:
  * 1. Pesan user → ekstrak kata kunci + filter harga → cari produk nyata di DB (grounding).
- * 2. Bila AI_API_KEY tersedia → kirim pesan + katalog grounding ke provider
- *    OpenAI-compatible; model WAJIB menjawab dari katalog & menandai produk
- *    dengan [produk:<id>].
+ * 2. Bila GEMINI_API_KEY tersedia → kirim pesan + katalog grounding ke API
+ *    native Google Gemini (v1beta: generateContent / streamGenerateContent);
+ *    model WAJIB menjawab dari katalog & menandai produk dengan [produk:<id>].
  * 3. Bila key absen / gagal / timeout → fallback deterministik berdasarkan
  *    hasil pencarian katalog (tanpa mengarang).
  *
@@ -35,6 +35,13 @@ const STOPWORDS = new Set([
   "habis", "masih", "kategori", "jenis", "toko", "penjual", "produk",
   "cari", "carikan", "mau", "beli", "jual", "adakah", "nggak", "dong",
   "donk", "nih", "rating", "bintang", "ulasan", "review", "komentar",
+  // Kata generik yang bukan kata kunci pencarian — sering muncul di
+  // pertanyaan katalog umum ("apa saja", "tampilkan produk", "lihat semua").
+  "saja", "aja", "barang", "katalog", "tampilkan", "tampilin", "tunjukkan",
+  "tunjukin", "perlihatkan", "lihat", "liat", "kasih", "tahu", "tau",
+  "daftar", "list", "sebutkan", "sebut", "item", "dong", "yuk", "coba",
+  "mana", "dimana", "tolong", "rekomendasi", "rekomendasikan", "pilihan",
+  "opsi", "option", "tersedia", "available", "seluruh", "lengkap",
 ]);
 
 export type AiChatMessage = { role: "user" | "assistant"; content: string };
@@ -109,6 +116,11 @@ export type ProductFilter = {
   category?: string; // nama kategori (ILIKE)
   store?: string; // nama toko (ILIKE)
   inStock?: boolean; // true = hanya yang tersedia (AVAILABLE & stok>0)
+  /** Telusuri katalog TANPA filter stok: semua produk terlihat (status ≠ HIDDEN,
+   *  termasuk yang habis stok). Default pertanyaan daftar umum ("ada produk
+   *  apa saja?") — permintaan daftar tidak boleh menyisipkan filter stok
+   *  yang tidak diminta. Bukan kondisi SQL (visibilitas = stockMatch default). */
+  browse?: boolean;
   minRating?: number; // rating minimal (0-5)
   sortBy?: "price_asc" | "price_desc" | "rating" | "newest" | "name";
 };
@@ -131,7 +143,12 @@ export function parseCategoryFilter(message: string): string | null {
 export function parseStoreFilter(message: string): string | null {
   const m = message.toLowerCase();
   const match = m.match(/(?:dari\s+toko|toko|di\s+toko|penjual|seller|jual\s+di)\s+([\w\s]+?)(?:\s+(?:yang|dengan|harga|adalah|di\s+bawah|di\s+atas|maksimal|kurang|lebih)|[.!?]|$)/);
-  return match ? match[1].trim() : null;
+  if (!match) return null;
+  const value = match[1].trim();
+  // Kata tanya ("toko mana yang paling banyak?") BUKAN nama toko — jangan
+  // menjadi filter pencarian yang salah sasaran.
+  if (/^(?:mana|siapa|apa|kapan|berapa|dimana|di\s+mana|yang|ini|itu)\b/.test(value)) return null;
+  return value;
 }
 
 /**
@@ -282,7 +299,19 @@ export function extractSubjectPhrase(message: string): string | null {
   const words = m
     .split(/\s+/)
     .map(stripNyaSuffix)
-    .filter((w) => w && w.length > 1 && !SUBJECT_FILLERS.has(w) && !/^\d+$/.test(w));
+    // Kata berhenti pencarian (STOPWORDS: "apa", "aja", "coba", "lihat",
+    // "mana", …) bukan subjek produk. Tanpa filter ini "Ada produk apa saja?"
+    // menyisakan frasa sampah "apa" yang jadi subjek name-mode → pencarian
+    // 0 baris → default telusuri katalog mati → AI kehilangan konteks dan
+    // mengarang "tidak ada produk" (akar masalah laporan user).
+    .filter(
+      (w) =>
+        w &&
+        w.length > 1 &&
+        !SUBJECT_FILLERS.has(w) &&
+        !STOPWORDS.has(w) &&
+        !/^\d+$/.test(w),
+    );
   if (words.length === 0) return null;
   return words.slice(0, 4).join(" ").trim();
 }
@@ -512,6 +541,91 @@ export function filterProductsByPrice(products: AiProduct[], filter: PriceFilter
  */
 export type FallbackReason = "no-ai-config" | "filtered" | "provider-error" | "direct";
 
+/* ------------------------------------------------------------------ */
+/* Klasifikasi maksud (intent) chatbot — taksonomi utama (Bagian 1). */
+/*                                                                    */
+/* Deteksi deterministik + penyempurnaan Gemini ada di ./ai-intent;   */
+/* definisi kategorinya DI SINI supaya modul routing (ai, ai-context, */
+/* ai-intent) bisa memakainya tanpa dependensi melingkar.             */
+/* ------------------------------------------------------------------ */
+
+export const CHATBOT_INTENTS = [
+  "PRODUCT_SEARCH", // pencarian/daftar produk
+  "PRODUCT_PRICE", // pertanyaan harga
+  "PRODUCT_STOCK", // pertanyaan stok
+  "PRODUCT_CATEGORY", // pencarian kategori
+  "REVENUE", // total pendapatan
+  "SALES_REPORT", // laporan penjualan
+  "ORDER_COUNT", // jumlah pesanan
+  "ORDER_STATUS", // status pesanan
+  "USER_COUNT", // jumlah pengguna (termasuk "per role")
+  "USER_ROLES", // jenis role yang tersedia di marketplace
+  "ROLE_PERMISSION", // hak akses/tugas satu atau semua role
+  "USER_LIST", // daftar pengguna (hanya peran yang diizinkan)
+  "SELLER_INFO", // informasi/jumlah penjual
+  "BUYER_INFO", // informasi/jumlah pembeli
+  "MARKETPLACE_STATS", // statistik marketplace
+  "ACCOUNT_INFO", // informasi profil akun yang sedang login
+  "STORE_INFO", // informasi toko
+  "SERVICE_INFO", // layanan marketplace
+  "GENERAL", // pertanyaan umum & percakapan
+] as const;
+
+export type ChatbotIntent = (typeof CHATBOT_INTENTS)[number];
+
+/**
+ * Intent yang jawabannya BUKAN produk: pendapatan, hitungan, pesanan, akun,
+ * role pengguna/hak akses, statistik, toko, layanan. Fallback untuk kategori
+ * ini TIDAK BOLEH berupa rekomendasi/daftar katalog (aturan "hapus fallback
+ * yang salah") — jawaban diambil hanya dari section data, atau pesan
+ * kegagalan/penolakan yang jujur.
+ */
+export const NON_CATALOG_INTENTS = new Set<ChatbotIntent>([
+  "REVENUE",
+  "SALES_REPORT",
+  "ORDER_COUNT",
+  "ORDER_STATUS",
+  "USER_COUNT",
+  "USER_ROLES",
+  "ROLE_PERMISSION",
+  "USER_LIST",
+  "SELLER_INFO",
+  "BUYER_INFO",
+  "MARKETPLACE_STATS",
+  "ACCOUNT_INFO",
+  "STORE_INFO",
+  "SERVICE_INFO",
+]);
+
+/** True bila intent wajib dijawab tanpa produk katalog. */
+export function isNonCatalogIntent(intent: ChatbotIntent | undefined): intent is ChatbotIntent {
+  return !!intent && NON_CATALOG_INTENTS.has(intent);
+}
+
+/**
+ * Intent yang jawabannya BERUPA data produk (daftar/harga/stok/kategori).
+ * Tanpa hasil query, pertanyaan ini TIDAK BOLEH diteruskan ke provider dengan
+ * konteks kosong — model bisa mengarang "tidak ada produk" padahal katalog
+ * berisi (sumber kebenaran = database, bukan ingatan model).
+ */
+export const CATALOG_LIST_INTENTS = new Set<ChatbotIntent>([
+  "PRODUCT_SEARCH",
+  "PRODUCT_PRICE",
+  "PRODUCT_STOCK",
+  "PRODUCT_CATEGORY",
+]);
+
+/** Parameter pencarian terstruktur — hasil ekstraksi deterministik dan/atau
+ * klasifikasi Gemini (dipadukan oleh mergeIntentParams di ./ai-intent). */
+export type IntentParams = {
+  priceMin?: number;
+  priceMax?: number;
+  priceMaxExclusive?: boolean;
+  category?: string;
+  inStock?: boolean;
+  sortBy?: "price_asc" | "price_desc" | "rating" | "newest" | "name";
+};
+
 export type AiChatResult = {
   reply: string;
   products: AiProduct[];
@@ -574,6 +688,14 @@ function filterConds(pf: ProductFilter): Prisma.Sql[] {
 }
 
 /**
+ * Batas jumlah baris katalog yang diambil untuk grounding chatbot.
+ * Cukup besar untuk katalog marketplace kecil (sehingga hitungan & daftar
+ * mencerminkan seluruh data), tetapi tetap dibatasi agar prompt AI tidak
+ * membengkak. Keterbatasan tampilan kartu (5) diumumkan di balasan.
+ */
+const CATALOG_QUERY_LIMIT = 60;
+
+/**
  * Cari produk nyata di DB untuk grounding jawaban AI.
  * Parameter seluruhnya lewat binding Prisma.sql (aman dari SQL injection).
  * Sekarang mendukung filter gabungan: harga, kategori, toko, ketersediaan,
@@ -603,16 +725,24 @@ async function searchCatalogRaw(
   if (
     keywords.length === 0 &&
     !pf.price && !pf.category && !pf.store && !pf.subject &&
-    pf.inStock === undefined && !pf.minRating && !pf.sortBy
+    pf.inStock === undefined && !pf.minRating && !pf.sortBy &&
+    !pf.browse
   ) {
     return [];
   }
 
-  // Kata kunci match (OR antar kata, toleran typo via ILIKE)
+  // Kata kunci match (OR antar kata, toleran typo via ILIKE).
+  // DIBUNGKUS kurung — tanpa kurung, klausa OR bocor melewati filter lain
+  // saat digabung AND (AND mengikat lebih kuat dari OR): filter toko/harga
+  // hanya menempel pada keyword terakhir dan produk lain lolos tanpa filter
+  // (bug J8: "Produk dari toko X" mengembalikan produk toko lain).
   const keywordConds = keywords.map(
     (kw) => Prisma.sql`(p.name ILIKE ${"%" + kw + "%"} OR p.description ILIKE ${"%" + kw + "%"} OR c.name ILIKE ${"%" + kw + "%"})`,
   );
-  const keywordMatch = keywordConds.length > 0 ? Prisma.join(keywordConds, " OR ") : Prisma.sql`true`;
+  const keywordMatch =
+    keywordConds.length > 0
+      ? Prisma.sql`(${Prisma.join(keywordConds, " OR ")})`
+      : Prisma.sql`true`;
 
   // Filter gabungan (semua kondisi AND — termasuk subjek produk).
   const filterParts = filterConds(pf);
@@ -667,7 +797,7 @@ async function searchCatalogRaw(
     ) r ON r."productId" = p.id
     WHERE ${where}
     ORDER BY ${orderBy}
-    LIMIT 12
+    LIMIT ${CATALOG_QUERY_LIMIT}
   `);
 
   // Jika keyword tidak match, coba pencarian longgar (hanya filter non-keyword).
@@ -695,7 +825,7 @@ async function searchCatalogRaw(
       ) r ON r."productId" = p.id
       WHERE ${looseWhere}
       ORDER BY ${orderBy}
-      LIMIT 12
+      LIMIT ${CATALOG_QUERY_LIMIT}
     `);
     return looseRows.map(toAiProduct);
   }
@@ -722,11 +852,14 @@ export async function findFocusProducts(
     ? { price: filters as PriceFilter }
     : (filters as ProductFilter | undefined) ?? {};
 
-  // Kata kunci match: cari di nama produk DAN kategori (untuk typo tolerance)
+  // Kata kunci match: cari di nama produk DAN kategori (untuk typo tolerance).
+  // DIBUNGKUS kurung — sama dengan searchCatalogRaw: OR tanpa kurung bocor
+  // melewati filter gabungan saat digabung AND.
   const conds = keywords.map(
     (kw) => Prisma.sql`(p.name ILIKE ${"%" + kw + "%"} OR c.name ILIKE ${"%" + kw + "%"})`,
   );
-  const match = conds.length > 0 ? Prisma.join(conds, " OR ") : Prisma.sql`true`;
+  const match =
+    conds.length > 0 ? Prisma.sql`(${Prisma.join(conds, " OR ")})` : Prisma.sql`true`;
 
   // Filter gabungan (harga, kategori, toko, rating, subjek) — helper bersama.
   const filterParts = filterConds(pf);
@@ -869,6 +1002,10 @@ const SYSTEM_PROMPT = [
   "27. Bila user meminta produk dengan subjek/jenis DAN filter harga (mis. 'hasil laut di bawah 50000'), filter gabungan SUDAH diterapkan di database (AND). Tampilkan HANYA daftar produk yang dikirim beserta jumlah yang cocok — JANGAN menampilkan ringkasan katalog atau statistik lain. Bila hasilnya kosong, katakan tidak ada produk yang memenuhi filter tersebut (bukan 'katalog kosong').",
   "28. Bila pertanyaan hitungan menyertakan subjek/filter (mis. 'berapa jumlah produk hasil laut?'), angka pada section 'Jumlah … (data aktual)' sudah dihitung dengan filter itu — jawab hanya angkanya.",
   "29. Bila konteks memuat baris 'SUBJEK PRODUK AMBIGUOUS', frasa user bisa berarti beberapa kategori — tanyakan pilihan kategori itu kepada user sebelum menampilkan produk.",
+  "30. Pertanyaan pendapatan/omzet/laporan penjualan dijawab HANYA dari section pendapatan/statistik pada DATA KONTEKS: sebutkan nominal, status pesanan yang dihitung, dan periode perhitungannya — JANGAN menampilkan daftar atau rekomendasi produk sebagai jawaban.",
+  "31. Bila DATA KONTEKS tidak memuat data yang diminta (mis. pendapatan tidak tersedia untuk peran Anda atau datanya gagal diambil), sampaikan keterbatasan itu apa adanya — jangan menggantinya dengan katalog, angka lain, atau jawaban karangan.",
+  "32. Untuk pertanyaan non-produk (pesanan, akun, pendapatan, statistik, layanan), JANGAN menyelipkan rekomendasi atau daftar produk yang tidak diminta.",
+  "33. Pertanyaan tentang JENIS role/hak akses pengguna (section 'Role pengguna & hak akses …' atau 'Daftar pengguna …') dijawab HANYA dari definisi role pada DATA KONTEKS — JANGAN pernah menggantinya dengan profil 'Informasi akun Anda' (nama/email/alamat Anda). Sebaliknya, pertanyaan tentang akun sendiri ('siapa saya', 'apa peran akun saya') dijawab dari section 'Informasi akun Anda'.",
 ].join("\n");
 
 /** Format section konteks per-peran + katalog untuk prompt model. */
@@ -913,7 +1050,7 @@ function contextForPrompt(
   parts.push(`KATALOG:\n${catalogForPrompt(products)}`);
   
   // Sertakan info filter aktif agar AI tahu filter apa yang sudah diterapkan
-  if (filters && (filters.price || filters.subject || filters.category || filters.store || filters.inStock !== undefined || filters.minRating !== undefined || filters.sortBy)) {
+  if (filters && (filters.price || filters.subject || filters.category || filters.store || filters.inStock !== undefined || filters.minRating !== undefined || filters.sortBy || filters.browse)) {
     const filterDesc: string[] = [];
     if (filters.price) {
       if (filters.price.min !== undefined) filterDesc.push(`min=Rp${filters.price.min.toLocaleString("id-ID")}`);
@@ -928,6 +1065,7 @@ function contextForPrompt(
     if (filters.store) filterDesc.push(`toko="${filters.store}"`);
     if (filters.inStock === true) filterDesc.push("hanya yang tersedia (stok>0)");
     if (filters.inStock === false) filterDesc.push("hanya yang habis");
+    if (filters.browse) filterDesc.push("tanpa filter stok (semua produk terlihat)");
     if (filters.minRating !== undefined) filterDesc.push(`rating minimal ${filters.minRating}`);
     if (filters.sortBy) filterDesc.push(`urutan: ${filters.sortBy}`);
     if (filterDesc.length > 0) {
@@ -1019,6 +1157,43 @@ const FALLBACK_SORT: Record<string, (a: AiProduct, b: AiProduct) => number> = {
   name: (a, b) => a.name.localeCompare(b.name, "id"),
 };
 
+/**
+ * Pesan kegagalan/penolakan JUJUR per intent non-katalog — dipakai saat
+ * section data tidak tersedia. Tidak pernah mengarang angka dan tidak pernah
+ * menggantinya dengan rekomendasi produk (aturan "hapus fallback yang salah").
+ */
+function noDataReply(intent: ChatbotIntent): string {
+  switch (intent) {
+    case "REVENUE":
+      return "Data pendapatan belum dapat diambil saat ini. Silakan coba lagi beberapa saat lagi.";
+    case "SALES_REPORT":
+      return "Laporan penjualan belum dapat diambil saat ini. Silakan coba lagi beberapa saat lagi.";
+    case "ORDER_COUNT":
+      return "Jumlah pesanan belum dapat diambil saat ini. Silakan coba lagi beberapa saat lagi.";
+    case "ORDER_STATUS":
+      return "Belum ada data pesanan untuk ditampilkan saat ini.";
+    case "USER_COUNT":
+    case "SELLER_INFO":
+    case "BUYER_INFO":
+      return "Data jumlah tersebut belum dapat diambil saat ini. Silakan coba lagi beberapa saat lagi.";
+    case "MARKETPLACE_STATS":
+      return "Statistik marketplace belum dapat diambil saat ini. Silakan coba lagi beberapa saat lagi.";
+    case "ACCOUNT_INFO":
+      return "Informasi akun tidak dapat diambil saat ini. Silakan coba lagi beberapa saat lagi.";
+    case "USER_ROLES":
+    case "ROLE_PERMISSION":
+      return "Informasi role dan hak aksesnya belum dapat dimuat saat ini. Silakan coba lagi beberapa saat lagi.";
+    case "USER_LIST":
+      return "Daftar pengguna belum dapat diambil saat ini. Silakan coba lagi beberapa saat lagi.";
+    case "STORE_INFO":
+      return "Informasi toko tidak ditemukan untuk pertanyaan tersebut.";
+    case "SERVICE_INFO":
+      return "Informasi layanan belum dapat dimuat saat ini.";
+    default:
+      return "Data yang Anda minta belum dapat diambil saat ini. Silakan coba lagi beberapa saat lagi.";
+  }
+}
+
 export function fallbackResult(opts: {
   message: string;
   products: AiProduct[];
@@ -1031,7 +1206,42 @@ export function fallbackResult(opts: {
   filters?: ProductFilter;
   /** Frasa subjek ambigu antar kategori → minta klarifikasi (jangan menebak). */
   subjectAmbiguity?: { phrase: string; options: string[] };
+  /** Intent klasifikasi utama — menentukan apakah jawaban boleh berupa produk. */
+  intent?: ChatbotIntent;
 }): AiChatResult {
+  // Intent NON-KATALOG (pendapatan, hitungan, pesanan, akun, role pengguna,
+  // statistik, toko, layanan) → jawab HANYA dari section data. TIDAK PERNAH
+  // menampilkan rekomendasi/daftar produk, dan tanpa section → pesan
+  // kegagalan yang jujur sesuai intent (bukan fallback ke katalog, bukan
+  // angka karangan). Intent role HANYA memakai section role/daftar pengguna —
+  // profil akun tidak boleh menyusup ke jawaban pertanyaan role.
+  if (isNonCatalogIntent(opts.intent)) {
+    const roleIntent =
+      opts.intent === "USER_ROLES" ||
+      opts.intent === "ROLE_PERMISSION" ||
+      opts.intent === "USER_LIST";
+    const dataSections = opts.sections.filter((s) =>
+      roleIntent ? s.key === "roles" || s.key === "userlist" : s.key !== "catalog",
+    );
+    if (dataSections.length > 0) {
+      const body = dataSections.map((s) => `${s.label}:\n${s.text}`).join("\n\n");
+      return {
+        reply: body.slice(0, 1800),
+        products: [],
+        sources: buildSources(dataSections, [], opts.generatedAt),
+        generatedAt: opts.generatedAt,
+        source: "fallback",
+      };
+    }
+    return {
+      reply: noDataReply(opts.intent),
+      products: [],
+      sources: [],
+      generatedAt: opts.generatedAt,
+      source: "fallback",
+    };
+  }
+
   // Parse price filter dari pesan untuk validasi deterministik
   const priceFilter = opts.filters?.price ?? parsePriceFilter(opts.message);
 
@@ -1120,6 +1330,19 @@ export function fallbackResult(opts: {
     };
   }
 
+  // 1b'. Ekstrem harga ("produk paling mahal dan paling murah?") — MIN/MAX
+  //      aktual dari database, jawab ringkas tanpa membanjiri daftar.
+  const extremeSections = opts.sections.filter((s) => s.key === "extremes");
+  if (extremeSections.length > 0) {
+    return {
+      reply: extremeSections.map((s) => `${s.label}:\n${s.text}`).join("\n\n"),
+      products: [],
+      sources: buildSources(extremeSections, [], opts.generatedAt),
+      generatedAt: opts.generatedAt,
+      source: "fallback",
+    };
+  }
+
   // 1c. Ulasan produk — tampilkan ulasan yang ada
   const reviewSections = opts.sections.filter((s) => s.key === "reviews");
   if (reviewSections.length > 0 && allProducts.length === 0) {
@@ -1160,7 +1383,7 @@ export function fallbackResult(opts: {
   const hasActiveFilters = !!(
     f &&
     (f.price || f.subject || f.category || f.store ||
-      f.inStock !== undefined || f.minRating !== undefined)
+      f.inStock !== undefined || f.minRating !== undefined || f.browse)
   );
   const suppressFiltered = opts.sections.some((s) =>
     ["reviews", "orders", "sales", "stats", "market", "account", "appinfo"].includes(s.key),
@@ -1177,7 +1400,7 @@ export function fallbackResult(opts: {
       const lines = shown
         .map(
           (p, i) =>
-            `${i + 1}. ${p.name} — Rp${p.price.toLocaleString("id-ID")} (stok ${p.stock}, ${statusLabel(p)}, ${p.storeName})`,
+            `${i + 1}. ${p.name} — Rp${p.price.toLocaleString("id-ID")} (stok ${p.stock}, ${statusLabel(p)}, kategori ${p.categoryName}, ${p.storeName})`,
         )
         .join("\n");
       const head = priceText
@@ -1279,7 +1502,7 @@ export function fallbackResult(opts: {
             .slice(0, 5)
             .map(
               (p, i) =>
-                `${i + 1}. ${p.name} — Rp${p.price.toLocaleString("id-ID")} (stok ${p.stock}, ${p.storeName})`,
+                `${i + 1}. ${p.name} — Rp${p.price.toLocaleString("id-ID")} (stok ${p.stock}, kategori ${p.categoryName}, ${p.storeName})`,
             )
             .join("\n") +
           "\n\nBuka /products untuk katalog lengkap."
@@ -1315,7 +1538,7 @@ export function fallbackResult(opts: {
     .slice(0, 5)
     .map(
       (p, i) =>
-        `${i + 1}. ${p.name} — Rp${p.price.toLocaleString("id-ID")} (stok ${p.stock}, ${p.storeName})`,
+        `${i + 1}. ${p.name} — Rp${p.price.toLocaleString("id-ID")} (stok ${p.stock}, kategori ${p.categoryName}, ${p.storeName})`,
     )
     .join("\n");
 
@@ -1352,18 +1575,21 @@ export type AiChatOpts = {
   filters?: ProductFilter;
   /** Frasa subjek ambigu antar kategori → konteks klarifikasi untuk AI & fallback. */
   subjectAmbiguity?: { phrase: string; options: string[] };
+  /** Intent klasifikasi utama (taksonomi CHATBOT_INTENTS) — dari classifyChatbotIntent. */
+  intent?: ChatbotIntent;
 };
 
 /**
  * Section yang jawabannya sudah LENGKAP dari data → tidak butuh AI
- * (hitungan, pesanan, akun, statistik, ulasan, stok, toko, panduan).
+ * (hitungan, pesanan, akun, statistik, ulasan, stok, toko, panduan, role).
  * "catalog" sengaja TIDAK disertakan: ringkasan angka untuk pertanyaan
  * umum (mis. "mengapa laut biru") lebih baik dijawab AI dengan konteks
  * seperlunya.
  */
 const DIRECT_SECTION_KEYS = new Set([
-  "count", "orders", "sales", "stats", "market", "account",
-  "appinfo", "reviews", "lowstock", "outofstock", "store",
+  "count", "extremes", "orders", "sales", "stats", "market", "account",
+  "appinfo", "reviews", "lowstock", "outofstock", "store", "revenue",
+  "roles", "userlist",
 ]);
 
 /** Sapaan/percakapan ringan — tanpa data, tanpa AI (jawab instan). */
@@ -1423,7 +1649,8 @@ function hasActiveFilter(opts: AiChatOpts): boolean {
       opts.filters.category ||
       opts.filters.store ||
       opts.filters.inStock !== undefined ||
-      opts.filters.minRating !== undefined)
+      opts.filters.minRating !== undefined ||
+      opts.filters.browse)
   );
 }
 
@@ -1457,14 +1684,27 @@ async function planReply(opts: AiChatOpts): Promise<ReplyPlan> {
     return reason ? { ...r, fallbackReason: reason } : r;
   };
 
+  // 0. Intent NON-KATALOG (pendapatan, laporan, hitungan, pesanan, akun,
+  //    statistik, toko, layanan) → SATU jawaban dari section data, instan,
+  //    tanpa AI dan tanpa produk. Tanpa section pun tetap jawaban jujur
+  //    sesuai intent — tidak pernah diteruskan ke provider dengan konteks
+  //    kosong (yang dulu bisa berujung rekomendasi katalog).
+  if (isNonCatalogIntent(opts.intent)) {
+    return { kind: "static", result: makeFallback("direct") };
+  }
+
   // 1. Query BERFILTER → deterministik: format stabil, tanpa risiko halusinasi.
   if (hasActiveFilter(opts)) {
     return { kind: "static", result: makeFallback("filtered") };
   }
 
   // 2. Sapaan/percakapan ringan → jawab instan (tanpa AI & tanpa query).
-  const dataBasis = hasDirectData(opts);
-  if (!dataBasis && isGreetingMessage(opts.message)) {
+  //    Sapaan murni menang MELEWATI konteks riwayat: "Siapa kamu?" saat
+  //    percakapan sudah memuat produk wajib dijawab perkenalan diri — bukan
+  //    daftar/kandidat produk. isGreetingMessage sendiri menolak pesan
+  //    ber-data ("Halo, berapa jumlah penjual?" → bukan sapaan), sehingga
+  //    pertanyaan data tetap jatuh ke jalur section/AI di bawah.
+  if (isGreetingMessage(opts.message)) {
     return {
       kind: "static",
       result: {
@@ -1481,7 +1721,42 @@ async function planReply(opts: AiChatOpts): Promise<ReplyPlan> {
   // 3. Pertanyaan terjawab penuh oleh data grounding → instan, TANPA AI
   //    (hitungan/akun/pesanan/fokus/stok/… — inilah penyebab lambat lama:
   //    pertanyaan berdata sempat menunggu provider yang timeout 90 dtk).
+  const dataBasis = hasDirectData(opts);
   if (dataBasis) {
+    return { kind: "static", result: makeFallback("direct") };
+  }
+
+  // 3b. Intent katalog TANPA hasil query & TANPA section → JANGAN diteruskan
+  //     ke AI dengan konteks kosong: provider pernah mengarang "tidak ada
+  //     produk" padahal katalog berisi (langkah ini jaring pengaman terakhir
+  //     setelah ekstraksi subjek & default telusuri katalog di buildChatContext).
+  //     - Pertanyaan generik (tanpa kata kunci) → telusuri katalog default
+  //       dulu; query WAJIB selesai sebelum berani menyatakan kosong.
+  //     - Pertanyaan spesifik yang hasilnya memang 0 → jawaban jujur dari
+  //       fallback (bukan karangan provider).
+  if (
+    opts.intent &&
+    CATALOG_LIST_INTENTS.has(opts.intent) &&
+    opts.products.length === 0 &&
+    opts.sections.length === 0
+  ) {
+    if (extractKeywords(opts.message).length === 0) {
+      const browse = await searchCatalog([], { browse: true });
+      if (browse.length > 0) {
+        return {
+          kind: "static",
+          result: {
+            ...fallbackResult({
+              ...opts,
+              products: browse,
+              filters: { ...(opts.filters ?? {}), browse: true },
+              generatedAt,
+            }),
+            fallbackReason: "filtered",
+          },
+        };
+      }
+    }
     return { kind: "static", result: makeFallback("direct") };
   }
 
@@ -1511,7 +1786,7 @@ async function planReply(opts: AiChatOpts): Promise<ReplyPlan> {
     { role: "system" as const, content: SYSTEM_PROMPT },
     {
       role: "system" as const,
-      content: `DATA DARI DATABASE:\n${contextForPrompt(
+      content: `INTENT TERDETEKSI: ${opts.intent ?? "GENERAL"}\n\nDATA DARI DATABASE:\n${contextForPrompt(
         opts.sections,
         opts.products,
         opts.contextProducts ?? [],
@@ -1577,6 +1852,56 @@ class MarkerSanitizer {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Pemanggilan provider Google Gemini (API native REST v1beta)         */
+/* ------------------------------------------------------------------ */
+
+/** URL permintaan Gemini native: {base}/models/{model}:(stream)generateContent. */
+export function geminiUrl(baseUrl: string, model: string, stream: boolean): string {
+  const m = model.replace(/^models\//, "");
+  const suffix = stream ? ":streamGenerateContent?alt=sse" : ":generateContent";
+  return `${baseUrl.replace(/\/+$/, "")}/models/${encodeURIComponent(m)}${suffix}`;
+}
+
+/**
+ * Peta pesan gaya OpenAI (system/user/assistant) → badan Gemini native:
+ * system → systemInstruction, assistant → role "model". API key TIDAK pernah
+ * masuk badan/URL — hanya header x-goog-api-key di backend.
+ */
+export function geminiBody(
+  messages: { role: "system" | "user" | "assistant"; content: string }[],
+  maxOutputTokens: number,
+): string {
+  const systemParts = messages
+    .filter((m) => m.role === "system")
+    .map((m) => ({ text: m.content }));
+  const contents = messages
+    .filter((m) => m.role !== "system")
+    .map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }],
+    }));
+  const body: Record<string, unknown> = {
+    contents,
+    generationConfig: { temperature: 0.2, maxOutputTokens },
+  };
+  if (systemParts.length > 0) body.systemInstruction = { parts: systemParts };
+  return JSON.stringify(body);
+}
+
+/**
+ * Ekstrak teks jawaban dari respons native Gemini:
+ * candidates[0].content.parts[].text — mendukung juga bentuk array potongan
+ * (respons non-SSE tanpa alt=sse) dengan menggabungkan seluruh teksnya.
+ */
+export function geminiText(data: unknown): string {
+  if (Array.isArray(data)) return data.map(geminiText).join("");
+  const j = data as { candidates?: { content?: { parts?: { text?: string }[] } }[] } | null;
+  return (j?.candidates?.[0]?.content?.parts ?? [])
+    .map((p) => (typeof p?.text === "string" ? p.text : ""))
+    .join("");
+}
+
 /**
  * Hasilkan balasan asisten (mode JSON — dipakai suite/scripts/unit test):
  * keputusan jalur IDENTIK dengan streamReply; bila AI, provider dipanggil
@@ -1592,20 +1917,17 @@ export async function generateReply(opts: AiChatOpts): Promise<AiChatResult> {
   const { baseUrl, model, timeoutMs } = runtime;
 
   try {
-    const res = await fetch(`${baseUrl}/chat/completions`, {
+    const res = await fetch(geminiUrl(baseUrl, model, false), {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, messages, temperature: 0.2, max_tokens: 1600 }),
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: geminiBody(messages, 1600),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) {
       const body = (await res.text().catch(() => "")).replace(/\s+/g, " ").slice(0, 160);
       throw new Error(`provider HTTP ${res.status}${body ? ` — ${body}` : ""}`);
     }
-    const data = (await res.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const content = data.choices?.[0]?.message?.content?.trim();
+    const content = geminiText(await res.json()).trim();
     if (!content) throw new Error("provider mengembalikan jawaban kosong");
 
     // Validasi id produk terhadap grounding — buang karangan model.
@@ -1625,10 +1947,14 @@ export async function generateReply(opts: AiChatOpts): Promise<AiChatResult> {
       source: "ai",
     };
   } catch (err) {
-    // Provider gagal (timeout/jaringan/HTTP error) → catat AMAN (tanpa key),
-    // lalu tampilkan jawaban fallback berbasis data.
+    // Provider gagal (timeout/jaringan/HTTP error/rate limit) → catat AMAN
+    // (tanpa key), lalu tampilkan jawaban fallback berbasis data — tidak
+    // pernah respons palsu.
     const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-    console.warn(`[ai] provider ${model} gagal → fallback. ${detail}`);
+    const rateLimited = /HTTP 429|RESOURCE_EXHAUSTED/.test(detail);
+    console.warn(
+      `[ai] provider ${model} gagal${rateLimited ? " (rate limit 429)" : ""} → fallback. ${detail}`,
+    );
     return makeFallback("provider-error");
   }
 }
@@ -1712,10 +2038,10 @@ export async function* streamReply(
           Boolean,
         ) as AbortSignal[],
       );
-      const res = await fetch(`${baseUrl}/chat/completions`, {
+      const res = await fetch(geminiUrl(baseUrl, model, true), {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model, messages, temperature: 0.2, max_tokens: 1600, stream: true }),
+        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+        body: geminiBody(messages, 1600),
         signal,
       });
       armIdle(); // header diterima → penghitung byte pertama di-reset
@@ -1730,11 +2056,8 @@ export async function* streamReply(
 
       const ctype = res.headers.get("content-type") ?? "";
       if (!res.body || !ctype.includes("event-stream")) {
-        // Provider mengabaikan stream → jawab 1 delta dari JSON biasa.
-        const data = (await res.json()) as {
-          choices?: { message?: { content?: string } }[];
-        };
-        const content = data.choices?.[0]?.message?.content ?? "";
+        // Provider mengabaikan stream → jawab1 delta dari JSON biasa.
+        const content = geminiText(await res.json());
         if (!content.trim()) throw new Error("provider mengembalikan jawaban kosong");
         raw = content;
         const text = sanitizer.push(content);
@@ -1762,13 +2085,15 @@ export async function* streamReply(
           if (!line.startsWith("data:")) continue;
           const payload = line.slice(5).trim();
           if (!payload || payload === "[DONE]") continue;
-          let ev: { choices?: { delta?: { content?: string } }[] };
+          let ev: { candidates?: { content?: { parts?: { text?: string }[] } }[] };
           try {
             ev = JSON.parse(payload);
           } catch {
             continue;
           }
-          const delta = ev?.choices?.[0]?.delta?.content;
+          // Bentuk native Gemini: candidates[0].content.parts[].text.
+          const parts = ev?.candidates?.[0]?.content?.parts;
+          const delta = parts ? parts.map((p) => p?.text ?? "").join("") : "";
           if (delta) {
             raw += delta;
             const text = sanitizer.push(delta);
@@ -1815,7 +2140,10 @@ export async function* streamReply(
     return;
   }
 
-  // Gagal total (timeout/5xx/jaringan/kosong/putus) → fallback data jujur.
-  console.warn(`[ai] stream ${model} gagal → fallback. ${detail || "jawaban kosong"}`);
+  // Gagal total (timeout/5xx/jaringan/kosong/putus/rate limit) → fallback data jujur.
+  const rateLimited = /HTTP 429|RESOURCE_EXHAUSTED/.test(detail);
+  console.warn(
+    `[ai] stream ${model} gagal${rateLimited ? " (rate limit 429)" : ""} → fallback. ${detail || "jawaban kosong"}`,
+  );
   yield { type: "failed", result: makeFallback("provider-error") };
 }

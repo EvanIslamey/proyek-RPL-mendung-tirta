@@ -27,7 +27,7 @@
  *  C. Kegagalan Fonnte (kuota habis / token salah) TIDAK PERNAH menggagalkan
  *     transaksi: order tetap 201 & bisa dibayar/dibatalkan; hanya waStatus=FAILED.
  *  D. Pembersihan penuh: order/notifikasi uji dihapus, phone/notify user & stok
- *     produk dipulihkan, baris config WA dihapus. Config AI NVIDIA TIDAK disentuh.
+ *     produk dipulihkan, baris config WA dihapus. Config AI TIDAK disentuh.
  */
 import http from "node:http";
 import { PrismaClient } from "../prisma/generated/client";

@@ -52,7 +52,8 @@ async function main() {
   console.log("\nEnv AI:");
   console.log(`- AI_BASE_URL=${process.env.AI_BASE_URL ?? "(kosong)"}`);
   console.log(`- AI_MODEL=${process.env.AI_MODEL ?? "(kosong)"}`);
-  console.log(`- AI_API_KEY=${process.env.AI_API_KEY ? `<ada, panjang ${process.env.AI_API_KEY.length}>` : "(kosong)"}`);
+  console.log(`- GEMINI_API_KEY=${process.env.GEMINI_API_KEY ? `<ada, panjang ${process.env.GEMINI_API_KEY.length}>` : "(kosong)"}`);
+  console.log(`- AI_API_KEY=${process.env.AI_API_KEY ? `<ada, panjang ${process.env.AI_API_KEY.length}>` : "(kosong)"} (alias lama)`);
 }
 
 main()

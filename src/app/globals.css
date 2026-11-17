@@ -104,6 +104,28 @@ a {
   box-shadow: 0 8px 16px rgba(255, 127, 80, 0.3);
 }
 
+/* ============================================================
+   Mendung Tirta · Design tokens (referensi Figma Make)
+   ============================================================ */
+:root {
+  --primary-dark: #0B3E8E;
+  --primary-soft: #E8F0FE;
+  --secondary-soft: #E6F7F6;
+  --accent-soft: #FFF0EA;
+  --surface: #FFFFFF;
+  --surface-2: #F5F8FD;
+  --gradient-ocean: linear-gradient(135deg, #E8F0FE 0%, #E6F7F6 55%, #FFF7F3 100%);
+  --gradient-primary: linear-gradient(135deg, #0F52BA 0%, #4169E1 100%);
+  --gradient-teal: linear-gradient(135deg, #20B2AA 0%, #4169E1 120%);
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 24px;
+  --radius-pill: 999px;
+  --shadow-card: 0 8px 30px rgba(15, 82, 186, 0.08);
+  --shadow-hover: 0 18px 40px rgba(15, 82, 186, 0.16);
+  --container-wide: 1240px;
+}
+
 /* Animations */
 @keyframes fadeInDown {
   from { opacity: 0; transform: translateY(-20px); }
@@ -113,4 +135,191 @@ a {
 @keyframes fadeInUp {
   from { opacity: 0; transform: translateY(20px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes floatSoft {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+.animate-fade-up {
+  animation: fadeInUp 0.7s ease both;
+}
+
+.delay-1 { animation-delay: 0.12s; }
+.delay-2 { animation-delay: 0.24s; }
+.delay-3 { animation-delay: 0.36s; }
+
+/* Tombol utama versi lebih lembut (pill) */
+.btn-primary,
+.btn-accent {
+  border-radius: var(--radius-pill);
+  padding: 12px 26px;
+  font-weight: 600;
+}
+
+.btn-outline {
+  background: transparent;
+  border: 1.5px solid var(--border-color);
+  color: var(--text-main);
+  border-radius: var(--radius-pill);
+  padding: 12px 26px;
+  font-weight: 600;
+}
+
+.btn-outline:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.btn-ghost {
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  color: var(--primary);
+  border-radius: var(--radius-pill);
+  padding: 12px 26px;
+  font-weight: 600;
+  backdrop-filter: blur(6px);
+}
+
+/* Kontrol form dasar agar seragam di semua halaman */
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea {
+  font-family: var(--font-family);
+  font-size: 0.95rem;
+  color: var(--text-main);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 10px 14px;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--primary-light);
+  box-shadow: 0 0 0 4px rgba(65, 105, 225, 0.14);
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--primary-light);
+  outline-offset: 2px;
+}
+
+/* Kartu permukaan standar */
+.surface-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+
+/* Section heading dengan label kecil di atas */
+.section-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--secondary);
+  margin-bottom: 0.6rem;
+}
+
+.section-title {
+  font-size: clamp(1.6rem, 2.4vw, 2.15rem);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.section-sub {
+  color: var(--text-muted);
+  margin-top: 0.5rem;
+  max-width: 620px;
+}
+
+/* Footer global (dipakai landing, katalog, detail) */
+.footer {
+  background: #0B1F3A;
+  color: #C9D6E8;
+  padding: 3rem 0 1.5rem;
+  margin-top: auto;
+}
+
+.footer a:hover {
+  color: #fff;
+}
+
+.footer-grid {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr 1fr 1.2fr;
+  gap: 2rem;
+  padding-bottom: 2rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.footer-brand {
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 0.65rem;
+}
+
+.footer-brand span {
+  color: var(--secondary);
+}
+
+.footer-col h3 {
+  font-size: 0.9rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #fff;
+  margin-bottom: 0.9rem;
+}
+
+.footer-col ul {
+  list-style: none;
+  display: grid;
+  gap: 0.55rem;
+  font-size: 0.92rem;
+}
+
+.footer-bottom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 1.25rem;
+  font-size: 0.85rem;
+  color: #8FA5C1;
+}
+
+@media (max-width: 900px) {
+  .footer-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .footer-grid {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

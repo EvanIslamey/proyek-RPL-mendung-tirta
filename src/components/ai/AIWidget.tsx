@@ -360,23 +360,6 @@ export function AIWidget() {
     }
   }
 
-  // Catatan jujur sesuai kondisi fallback (Bagian 2E) — provider error diberi
-  // penekanan visual, bukan disamarkan sebagai jawaban normal.
-  function fallbackNote(reason: ChatMessage["fallbackReason"]): string {
-    switch (reason) {
-      case "provider-error":
-        return "AI sementara tidak tersedia — jawaban diambil dari data database terkini. Penyebabnya sudah dicatat di server.";
-      case "filtered":
-        return "Disusun langsung dari data database terkini (query terfilter).";
-      case "direct":
-        return "Jawaban cepat disusun langsung dari data aplikasi — tanpa menunggu AI.";
-      case "no-ai-config":
-        return "Mode katalog — jawaban dari data database terkini (AI belum dikonfigurasi).";
-      default:
-        return "Mode katalog — jawaban dari data database terkini (tanpa AI).";
-    }
-  }
-
   return (
     <>
       {open && (
@@ -406,16 +389,6 @@ export function AIWidget() {
             {messages.map((m) => (
               <div key={m.id} className={`ai-msg ai-msg-${m.role}${m.error ? " ai-msg-error" : ""}`}>
                 <p className="ai-msg-text">{m.text}</p>
-
-                {m.source === "fallback" && (
-                  <span
-                    className={`ai-note${
-                      m.fallbackReason === "provider-error" ? " ai-note-warn" : ""
-                    }`}
-                  >
-                    {fallbackNote(m.fallbackReason)}
-                  </span>
-                )}
 
                 {m.role === "assistant" && !!m.sources?.length && (
                   <span className="ai-note ai-sources">
@@ -499,7 +472,16 @@ export function AIWidget() {
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
       >
-        {open ? "×" : "💬"}
+        {open ? (
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <path d="M6 6l12 12M18 6 6 18" />
+          </svg>
+        ) : (
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9.6 9.6 0 0 1-3.6-.9L3 21l1.9-4.7A8.2 8.2 0 0 1 3.6 11.5a8.4 8.4 0 0 1 8.7-8.4 8.4 8.4 0 0 1 8.7 8.4Z" />
+            <path d="M8.5 11.5h.01M12 11.5h.01M15.5 11.5h.01" />
+          </svg>
+        )}
       </button>
     </>
   );

@@ -17,7 +17,7 @@
  *
  * JAMINAN PENTING: seluruh baris IntegrationConfig + data phone/whatsappNotify user
  * di-SNAPSHOT di awal dan DIPULIKAN di finally (termasuk saat gagal) — konfigurasi
- * AI NVIDIA yang AKTIF tidak pernah hilang oleh script ini.
+ * AI yang AKTIF tidak pernah hilang oleh script ini.
  */
 import { PrismaClient } from "../prisma/generated/client";
 import { PrismaPg } from "@prisma/adapter-pg";
@@ -361,7 +361,7 @@ async function main() {
       const save = await api("/api/settings/api-key", {
         method: "PUT",
         cookie,
-        body: { name: "Chatbot Utama", provider: "openai-compatible", credential: TOKEN, model: "gpt-test" },
+        body: { name: "Chatbot Utama", provider: "gemini", credential: TOKEN, model: "gemini-test" },
       });
       check("ADMIN simpan API Key -> 200", save.status === 200, `status ${save.status}: ${save.text.slice(0, 150)}`);
       check("Response simpan TIDAK memuat API key mentah", !save.text.includes(TOKEN));
@@ -381,10 +381,10 @@ async function main() {
       check("Simpan ulang tanpa credential -> key lama dipertahankan", resave.status === 200 && cfg2?.hasCredential === true, `status ${resave.status}`);
 
       // --- 3b. Uji koneksi: jalankan sungguhan, hasil diambil apa adanya ---
-      // Catatan: sebagian provider (mis. /models NVIDIA) mengembalikan katalog publik
-      // 200 OK meski key tidak valid. Karena itu test TIDAK mengasumsikan ok=false —
-      // yang diuji adalah: (1) hasil berasal dari permintaan nyata, dan (2) guard
-      // aktivasi di backend menolak konfigurasi yang belum lolos uji.
+      // Karena hasil uji diambil dari permintaan NYATA, test TIDAK mengasumsikan
+      // ok=false maupun ok=true — yang diuji adalah: (1) hasil berasal dari
+      // permintaan nyata, dan (2) guard aktivasi di backend menolak konfigurasi
+      // yang belum lolos uji.
       const test = await api("/api/settings/api-key/test", { method: "POST", cookie });
       check("Uji koneksi API Key -> 200 + hasil aktual", test.status === 200, `status ${test.status}: ${test.text.slice(0, 150)}`);
       const result = test.json?.result as { ok?: boolean; note?: string } | undefined;
@@ -411,7 +411,7 @@ async function main() {
         `status ${chat.status}, source=${String(chat.json?.source)} reply=${reply.slice(0, 80)}`,
       );
 
-      // --- 3e. Hapus konfigurasi -> kembali bersih (NVIDIA dipulihkan di finally) ---
+      // --- 3e. Hapus konfigurasi -> kembali bersih (config AI dipulihkan di finally) ---
       const del = await api("/api/settings/api-key", { method: "DELETE", cookie });
       check("Hapus API Key -> 200", del.status === 200, `status ${del.status}`);
       const afterDel = await api("/api/settings/api-key", { cookie });
@@ -514,7 +514,7 @@ async function main() {
       }
       const restored = await prisma.integrationConfig.count();
       console.log(
-        `[restore] ${cfgSnapshot.length} konfigurasi (termasuk AI NVIDIA aktif) & ${userSnapshot.length} profil user dipulihkan (kini ${restored} baris).`,
+        `[restore] ${cfgSnapshot.length} konfigurasi (termasuk AI aktif) & ${userSnapshot.length} profil user dipulihkan (kini ${restored} baris).`,
       );
     } catch (e) {
       console.error("[restore] GAGAL memulihkan:", e);

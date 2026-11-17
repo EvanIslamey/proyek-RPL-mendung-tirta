@@ -1,5 +1,5 @@
 /**
- * Uji chatbot LIVE dengan konfigurasi NVIDIA aktif di DB.
+ * Uji chatbot LIVE dengan konfigurasi AI (Google Gemini) dari DB/env.
  * - Login sebagai pembeli, kirim 1 permintaan sederhana ke /api/ai/chat.
  * - Cek jawaban berasal dari provider (source="ai"), bukan karangan.
  * - Cek resolveAiRuntime() memakai konfigurasi DB (tanpa mencetak key).

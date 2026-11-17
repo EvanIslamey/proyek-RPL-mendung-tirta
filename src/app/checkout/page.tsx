@@ -93,7 +93,13 @@ export default function CheckoutPage() {
         <SiteNav />
         <main className="container checkout-main">
           <div className="market-empty">
-            <div className="market-empty-icon" aria-hidden="true">🔐</div>
+            <div className="market-empty-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="4" y="10" width="16" height="10" rx="2.5" />
+                <path d="M8 10V7.5a4 4 0 0 1 8 0V10" />
+                <circle cx="12" cy="15" r="1.2" />
+              </svg>
+            </div>
             <h2>Silakan masuk terlebih dahulu</h2>
             <p>Anda perlu login untuk menyelesaikan pesanan.</p>
             <Link href="/login?next=/checkout" className="btn btn-primary">Masuk</Link>
@@ -109,7 +115,13 @@ export default function CheckoutPage() {
         <SiteNav />
         <main className="container checkout-main">
           <div className="market-empty">
-            <div className="market-empty-icon" aria-hidden="true">🛒</div>
+            <div className="market-empty-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h7.9a2 2 0 0 0 2-1.6L21 8H6" />
+                <circle cx="10" cy="20" r="1.3" />
+                <circle cx="18" cy="20" r="1.3" />
+              </svg>
+            </div>
             <h2>Keranjang kosong</h2>
             <p>Tambahkan produk sebelum melakukan checkout.</p>
             <Link href="/products" className="btn btn-primary">Lihat Katalog</Link>

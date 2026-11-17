@@ -107,7 +107,7 @@ export async function POST(request: NextRequest) {
       );
       return Response.json({
         reply:
-          "Maaf, layanan data sedang tidak tersedia. Silakan coba lagi beberapa saat lagi.",
+          "Maaf, terjadi gangguan sistem — layanan data tidak dapat diakses. Silakan coba lagi beberapa saat lagi.",
         products: [],
         sources: [],
         generatedAt: new Date().toISOString(),
@@ -129,6 +129,7 @@ export async function POST(request: NextRequest) {
       ambiguousFollowUp: context.ambiguousFollowUp,
       filters: context.filters,
       subjectAmbiguity: context.subjectAmbiguity,
+      intent: context.intent,
     };
 
     // 2a. Streaming (SSE) — hanya bila diminta; jalur tetap menentukan sendiri.
@@ -187,7 +188,7 @@ export async function POST(request: NextRequest) {
             }
             console.log(
               `[ai-timing] ctx=${ctxMs}ms total=${Math.round(performance.now() - t0)}ms ` +
-                `path=stream ${finalLabel}`,
+                `path=stream intent=${chatOpts.intent ?? "GENERAL"} ${finalLabel}`,
             );
           }
         },
@@ -213,7 +214,8 @@ export async function POST(request: NextRequest) {
     const result = await generateReply(chatOpts);
     console.log(
       `[ai-timing] ctx=${ctxMs}ms total=${Math.round(performance.now() - t0)}ms ` +
-        `path=json source=${result.source}${result.fallbackReason ? `:${result.fallbackReason}` : ""} ` +
+        `path=json intent=${chatOpts.intent ?? "GENERAL"} ` +
+        `source=${result.source}${result.fallbackReason ? `:${result.fallbackReason}` : ""} ` +
         `chars=${result.reply.length}`,
     );
     return Response.json(result);

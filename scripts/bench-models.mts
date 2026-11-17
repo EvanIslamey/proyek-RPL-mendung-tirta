@@ -1,19 +1,22 @@
 /**
- * Benchmark AMAN model NVIDIA NIM yang TERDAFTAR di akun (dari GET /models),
- * memakai beban prompt mirip chatbot (system prompt ~6KB + pesan user,
- * temperature 0.2, max_tokens 1600 — parameter yang sama dengan src/lib/ai.ts).
+ * Benchmark AMAN model Google Gemini (API native v1beta) yang TERDAFTAR di
+ * akun (dari GET /models), memakai beban prompt mirip chatbot (system prompt
+ * ~6KB + pesan user, temperature 0.2, maxOutputTokens 1600 — parameter yang
+ * sama dengan src/lib/ai.ts).
  *
- * - API key dari env, TIDAK PERNAH dicetak.
+ * - API key dari env (GEMINI_API_KEY), TIDAK PERNAH dicetak.
  * - Kandidat yang TIDAK ada di daftar akun otomatis dilewati (tanpa menebak).
  *
  * Usage: npx tsx scripts/bench-models.mts
  */
 import "dotenv/config";
 
-const base = (process.env.AI_BASE_URL?.trim() || "").replace(/\/+$/, "");
-const key = process.env.AI_API_KEY?.trim() || "";
-if (!base || !key) {
-  console.error("GAGAL: AI_BASE_URL / AI_API_KEY kosong.");
+const base = (
+  process.env.AI_BASE_URL?.trim() || "https://generativelanguage.googleapis.com/v1beta"
+).replace(/\/+$/, "");
+const key = process.env.GEMINI_API_KEY?.trim() || process.env.AI_API_KEY?.trim() || "";
+if (!key) {
+  console.error("GAGAL: GEMINI_API_KEY kosong.");
   process.exit(1);
 }
 
@@ -31,15 +34,13 @@ const SYSTEM = [
   ),
 ].join("\n");
 
+// Kandidat model Gemini — diverifikasi dulu terhadap katalog akun (GET /models).
 const CANDIDATES = [
-  "nvidia/nemotron-3.5-lightning-30b-a3b",
-  "nvidia/nemotron-nano-3-30b-a3b",
-  "nvidia/llama-3.1-nemotron-51b-instruct",
-  "z-ai/glm-5.3-flash", // retry: gelombang 1 timeout (mungkin cold start)
-  "deepseek-ai/deepseek-v4.1-flash", // retry
-  "openai/gpt-oss-20b", // retry (model aktif saat ini)
-  "google/gemma-4-31b-it", // retry
-  "stepfun-ai/step-5-preview",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-3.8-flash",
 ];
 
 const PER_MODEL_TIMEOUT = 75_000;
@@ -47,54 +48,64 @@ const PER_MODEL_TIMEOUT = 75_000;
 async function bench(model: string): Promise<void> {
   const t0 = Date.now();
   try {
-    const res = await fetch(`${base}/chat/completions`, {
+    const res = await fetch(`${base}/models/${encodeURIComponent(model)}:generateContent`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
       body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: SYSTEM },
-          { role: "user", content: USER_MSG },
-        ],
-        temperature: 0.2,
-        max_tokens: 1600,
+        systemInstruction: { parts: [{ text: SYSTEM }] },
+        contents: [{ role: "user", parts: [{ text: USER_MSG }] }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 1600 },
       }),
       signal: AbortSignal.timeout(PER_MODEL_TIMEOUT),
     });
     const ms = Date.now() - t0;
     const data = (await res.json().catch(() => null)) as
       | {
-          choices?: Array<{
-            finish_reason?: string;
-            message?: { content?: string; reasoning?: string; reasoning_content?: string };
+          candidates?: Array<{
+            finishReason?: string;
+            content?: { parts?: Array<{ text?: string; thought?: boolean }> };
           }>;
+          usageMetadata?: { totalTokenCount?: number };
           error?: { message?: string };
         }
       | null;
-    const choice = data?.choices?.[0];
-    const content = choice?.message?.content?.trim() ?? "";
-    const reasoningLen = (choice?.message?.reasoning ?? choice?.message?.reasoning_content ?? "").length;
+    const cand = data?.candidates?.[0];
+    const parts = cand?.content?.parts ?? [];
+    const content = parts
+      .filter((p) => !p.thought)
+      .map((p) => p.text ?? "")
+      .join("")
+      .trim();
+    const thinkingLen = parts
+      .filter((p) => p.thought)
+      .map((p) => p.text ?? "")
+      .join("").length;
+    const tokens = data?.usageMetadata?.totalTokenCount ?? null;
     const err = data?.error?.message
       ? data.error.message.replace(/[A-Za-z0-9_.-]{12,}/g, "[rahasia]").slice(0, 120)
       : "";
     console.log(
-      `${model.padEnd(40)} HTTP ${res.status} ${String(ms).padStart(6)}ms finish=${choice?.finish_reason ?? "-"} content=${String(content.length).padStart(4)}c reasoning=${String(reasoningLen).padStart(5)}c${err ? ` err=${err}` : ""}`,
+      `${model.padEnd(24)} HTTP ${res.status} ${String(ms).padStart(6)}ms finish=${cand?.finishReason ?? "-"} content=${String(content.length).padStart(4)}c thinking=${String(thinkingLen).padStart(5)}c tokens=${tokens ?? "-"}${err ? ` err=${err}` : ""}`,
     );
     if (content) console.log(`  → ${JSON.stringify(content.slice(0, 140))}`);
   } catch (e) {
     console.log(
-      `${model.padEnd(40)} GAGAL ${Date.now() - t0}ms — ${e instanceof Error ? e.message.slice(0, 120) : e}`,
+      `${model.padEnd(24)} GAGAL ${Date.now() - t0}ms — ${e instanceof Error ? e.message.slice(0, 120) : e}`,
     );
   }
 }
 
 async function main() {
   const modelsRes = await fetch(`${base}/models`, {
-    headers: { Authorization: `Bearer ${key}` },
+    headers: { "x-goog-api-key": key },
     signal: AbortSignal.timeout(30_000),
   });
-  const payload = (await modelsRes.json().catch(() => null)) as { data?: Array<{ id?: string }> } | null;
-  const ids = new Set((payload?.data ?? []).map((m) => String(m.id ?? "")));
+  const payload = (await modelsRes.json().catch(() => null)) as
+    | { models?: Array<{ name?: string }> }
+    | null;
+  const ids = new Set(
+    (payload?.models ?? []).map((m) => String(m.name ?? "").replace(/^models\//, "")),
+  );
   console.log(`Daftar model akun: ${ids.size}\n`);
 
   const list = CANDIDATES.filter((m) => ids.has(m));

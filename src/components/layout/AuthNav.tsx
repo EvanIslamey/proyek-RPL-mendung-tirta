@@ -17,6 +17,52 @@ import { notifySessionChanged, useSessionUser } from "./use-session-user";
  * Sesi diambil lewat hook bersama (useSessionUser) agar konsisten.
  */
 
+/** Ikon garis kecil untuk item menu navbar (seragam, bukan emoji). */
+function NavIcon({ name }: { name: "bag" | "book" | "user" | "logout" }) {
+  const paths: Record<typeof name, React.ReactNode> = {
+    bag: (
+      <>
+        <path d="M5 8h14l1 12H4L5 8Z" />
+        <path d="M9 8V6a3 3 0 0 1 6 0v2" />
+      </>
+    ),
+    book: (
+      <>
+        <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5v-16Z" />
+        <path d="M4 18.5A2.5 2.5 0 0 1 6.5 16H20" />
+      </>
+    ),
+    user: (
+      <>
+        <circle cx="12" cy="8" r="3.4" />
+        <path d="M5.5 20c.8-3.4 3.4-5.3 6.5-5.3s5.7 1.9 6.5 5.3" />
+      </>
+    ),
+    logout: (
+      <>
+        <path d="M14 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8" />
+        <path d="M17 8l4 4-4 4M21 12H10" />
+      </>
+    ),
+  };
+
+  return (
+    <svg
+      width="17"
+      height="17"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {paths[name]}
+    </svg>
+  );
+}
+
 /** Dropdown "Informasi" — Layanan & Tentang Kami (section publik beranda). */
 function InfoMenu() {
   const [open, setOpen] = useState(false);
@@ -51,7 +97,7 @@ function InfoMenu() {
             role="menuitem"
             onClick={() => setOpen(false)}
           >
-            <span className="nav-account-icon" aria-hidden="true">🛍️</span>
+            <span className="nav-account-icon" aria-hidden="true"><NavIcon name="bag" /></span>
             <span>Layanan</span>
           </Link>
           <Link
@@ -60,7 +106,7 @@ function InfoMenu() {
             role="menuitem"
             onClick={() => setOpen(false)}
           >
-            <span className="nav-account-icon" aria-hidden="true">📖</span>
+            <span className="nav-account-icon" aria-hidden="true"><NavIcon name="book" /></span>
             <span>Tentang Kami</span>
           </Link>
         </div>
@@ -134,7 +180,7 @@ export function AuthNav() {
                 role="menuitem"
                 onClick={() => setMenuOpen(false)}
               >
-                <span className="nav-account-icon" aria-hidden="true">👤</span>
+                <span className="nav-account-icon" aria-hidden="true"><NavIcon name="user" /></span>
                 <span>Informasi Diri</span>
               </Link>
               {/* Layanan & Tentang Kami pindah ke menu "Informasi" terpisah. */}
@@ -146,7 +192,7 @@ export function AuthNav() {
                 onClick={logout}
                 disabled={loggingOut}
               >
-                <span className="nav-account-icon" aria-hidden="true">🚪</span>
+                <span className="nav-account-icon" aria-hidden="true"><NavIcon name="logout" /></span>
                 <span>{loggingOut ? "…" : "Keluar"}</span>
               </button>
             </div>

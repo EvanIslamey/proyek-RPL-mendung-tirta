@@ -52,7 +52,13 @@ export default function OrdersPage() {
 
         {needsLogin && (
           <div className="market-empty">
-            <div className="market-empty-icon" aria-hidden="true">🔐</div>
+            <div className="market-empty-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="4" y="10" width="16" height="10" rx="2.5" />
+                <path d="M8 10V7.5a4 4 0 0 1 8 0V10" />
+                <circle cx="12" cy="15" r="1.2" />
+              </svg>
+            </div>
             <h2>Silakan masuk</h2>
             <p>Login untuk melihat riwayat pesanan Anda.</p>
             <Link href="/login?next=/orders" className="btn btn-primary">Masuk</Link>
@@ -70,7 +76,12 @@ export default function OrdersPage() {
 
         {orders !== null && orders.length === 0 && !error && (
           <div className="market-empty">
-            <div className="market-empty-icon" aria-hidden="true">📦</div>
+            <div className="market-empty-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <path d="m12 3 8 4v10l-8 4-8-4V7l8-4Z" />
+                <path d="m4 7 8 4 8-4M12 11v10" />
+              </svg>
+            </div>
             <h2>Belum ada pesanan</h2>
             <p>Pesanan Anda akan muncul di sini setelah checkout.</p>
             <Link href="/products" className="btn btn-primary">Mulai Belanja</Link>

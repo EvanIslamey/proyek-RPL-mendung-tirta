@@ -2,6 +2,8 @@ import { redirect } from "next/navigation";
 import { getSessionUser } from "@/lib/auth";
 import { SiteNav } from "@/components/layout/SiteNav";
 import { DashNavLink } from "@/components/layout/DashNavLink";
+import { DashIcon } from "@/components/layout/DashIcon";
+import Link from "next/link";
 import "../dashboard.css";
 
 /**
@@ -20,10 +22,14 @@ export default async function SellerLayout({ children }: { children: React.React
       <main className="container dash-shell">
         <aside className="dash-sidebar" aria-label="Navigasi dashboard penjual">
           <span className="dash-sidebar-title">Panel Penjual</span>
-          <DashNavLink href="/seller/dashboard">📊 Dashboard</DashNavLink>
-          <DashNavLink href="/seller/profile">👤 Informasi Diri</DashNavLink>
-          <DashNavLink href="/seller/products">📦 Produk</DashNavLink>
-          <DashNavLink href="/seller/orders">🧾 Pesanan</DashNavLink>
+          <DashNavLink href="/seller/dashboard"><DashIcon name="dashboard" /> Dashboard</DashNavLink>
+          <DashNavLink href="/seller/profile"><DashIcon name="user" /> Informasi Diri</DashNavLink>
+          <DashNavLink href="/seller/products"><DashIcon name="box" /> Produk</DashNavLink>
+          <DashNavLink href="/seller/orders"><DashIcon name="receipt" /> Pesanan</DashNavLink>
+          <div className="dash-sidebar-footer">
+            <span>{user.name}</span>
+            <Link href="/products">Lihat katalog →</Link>
+          </div>
         </aside>
         <div className="dash-main">{children}</div>
       </main>

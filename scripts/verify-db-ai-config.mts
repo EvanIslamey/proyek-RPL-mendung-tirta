@@ -4,7 +4,7 @@
  * Strategi: jalankan mock provider AI lokal, simpan konfigurasi AI yang menunjuk
  * ke mock (credential palsu khusus uji), aktifkan setelah mock-nya "lolos uji",
  * lalu kirim pesan chatbot. Bila jawaban berasal dari mock DAN header
- * Authorization memakai credential dari DB (bukan env), terbukti resolver
+ * x-goog-api-key memakai credential dari DB (bukan env), terbukti resolver
  * memprioritaskan DB. Semua data uji dibersihkan di akhir.
  *
  * Jalankan terhadap dev server yang hidup:
@@ -65,21 +65,22 @@ function sessionCookie(setCookie: string[]): string | null {
 }
 
 async function main() {
-  // --- Mock provider AI lokal: /models (untuk uji) + /chat/completions (untuk chat) ---
-  let chatAuth: string | null = null; // auth yang diterima di /chat/completions saja
+  // --- Mock provider AI lokal (API native Gemini): GET /models (uji koneksi)
+  //     + POST /models/{model}:generateContent (chat) ---
+  let chatAuth: string | null = null; // x-goog-api-key yang diterima di :generateContent
   const mock = http.createServer((req, res) => {
-    const auth = req.headers.authorization ?? null;
     res.setHeader("Content-Type", "application/json");
     if (req.url?.endsWith("/models")) {
-      res.end(JSON.stringify({ data: [{ id: "mock-model" }] }));
+      res.end(JSON.stringify({ models: [{ name: "models/mock-model" }] }));
       return;
     }
-    if (req.url?.endsWith("/chat/completions")) {
-      chatAuth = auth;
+    if (req.url?.includes(":generateContent")) {
+      const auth = req.headers["x-goog-api-key"];
+      chatAuth = typeof auth === "string" ? auth : null;
       req.resume(); // buang body permintaan (mock tidak membacanya)
       res.end(
         JSON.stringify({
-          choices: [{ message: { role: "assistant", content: "Jawaban dari mock DB." } }],
+          candidates: [{ content: { parts: [{ text: "Jawaban dari mock DB." }] } }],
         }),
       );
       return;
@@ -99,7 +100,7 @@ async function main() {
     const row = await saveIntegrationConfig({
       service: "AI_PROVIDER",
       scope: "",
-      provider: "openai-compatible",
+      provider: "gemini",
       endpoint: mockBase,
       credential: DB_KEY,
       model: "mock-model",
@@ -138,11 +139,10 @@ async function main() {
     const chat = await api("/api/ai/chat", {
       method: "POST",
       cookie,
-      // Pesan TANPA filter subjek/harga/store — filter aktif memang sengaja
-      // memakai jalur deterministik (bukan provider), jadi untuk menguji
-      // pemakaian konfigurasi DB kita pakai pertanyaan yang menghasilkan
-      // filters kosong (diverifikasi via scripts/debug-chat-filters.mts).
-      body: { message: "Bagaimana cara membeli produk?" },
+      // Pertanyaan umum tanpa kata produk/harga/store → selalu jalur AI
+      // (diverifikasi langsung: source=ai). Hindari "cara membeli" yang kini
+      // jatuh ke jalur deterministik direct (ekspansi intent di ai-context).
+      body: { message: "Siapa presiden Indonesia sekarang?" },
     });
     const reply = (chat.json?.reply as string | undefined) ?? "";
     check(
@@ -154,8 +154,8 @@ async function main() {
     );
     check(
       "Request provider memakai credential terdekripsi dari DB (bukan env)",
-      chatAuth === `Bearer ${DB_KEY}`,
-      `auth=${chatAuth === null ? "tidak ada di /chat/completions" : "diterima"}`,
+      chatAuth === DB_KEY,
+      `auth=${chatAuth === null ? "tidak ada di :generateContent" : "diterima"}`,
     );
 
     // --- 6. Nonaktifkan → chatbot kembali ke env (fallback/ai env) ---
@@ -169,8 +169,9 @@ async function main() {
   } finally {
     // --- 7. Bersihkan semua data uji ---
     await deleteIntegrationConfig("AI_PROVIDER", "");
-    const left = await prisma.integrationConfig.findMany();
-    check("Konfigurasi uji dibersihkan dari DB", left.length === 0, `sisa=${left.length}`);
+    // Hanya baris AI yang dikelola skrip ini — baris WA/Telegram tidak disentuh.
+    const left = await prisma.integrationConfig.findMany({ where: { service: "AI_PROVIDER" } });
+    check("Konfigurasi uji AI dibersihkan dari DB", left.length === 0, `sisa=${left.length}`);
     await prisma.$disconnect();
     mock.close();
   }

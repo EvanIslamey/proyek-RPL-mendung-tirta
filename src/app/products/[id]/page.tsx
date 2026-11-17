@@ -1,9 +1,12 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { SiteNav } from "@/components/layout/SiteNav";
-import { AddToCartButton } from "@/components/product/AddToCartButton";
+import { SiteFooter } from "@/components/layout/SiteFooter";
 import { ProductCard } from "@/components/product/ProductCard";
+import { ProductImage } from "@/components/product/ProductImage";
+import { PurchasePanel } from "@/components/product/PurchasePanel";
 import { formatRupiah } from "@/lib/format";
+import { productUnit } from "@/lib/product-format";
 import { getProductDetail, getRelatedProducts } from "@/lib/catalog";
 import "../products.css";
 import "./detail.css";
@@ -26,6 +29,7 @@ export default async function ProductDetailPage({
 
   const related = await getRelatedProducts(product.id, product.category.id);
   const habis = product.stock <= 0 || product.status === "OUT_OF_STOCK";
+  const unit = productUnit(product.name);
 
   return (
     <div className="market-wrapper">
@@ -35,16 +39,39 @@ export default async function ProductDetailPage({
         <nav className="detail-breadcrumb" aria-label="Breadcrumb">
           <Link href="/products">Katalog</Link>
           <span aria-hidden="true"> / </span>
-          <span>{product.category.name}</span>
+          <Link href={`/products?kategori=${encodeURIComponent(product.category.name)}`}>
+            {product.category.name}
+          </Link>
           <span aria-hidden="true"> / </span>
           <span aria-current="page">{product.name}</span>
         </nav>
 
         <div className="detail-grid">
-          <div className="detail-media" aria-hidden="true">
-            <span className="detail-emoji">
-              {product.category.name.toLowerCase().includes("laut") ? "🐟" : "🎣"}
-            </span>
+          <div className="detail-gallery">
+            <div className="detail-media">
+              <ProductImage
+                src={product.image}
+                alt={`Foto ${product.name}`}
+                category={product.category.name}
+                priority
+                className="detail-media-img"
+              />
+              {habis && <span className="detail-media-badge">Stok habis</span>}
+            </div>
+            <div className="detail-media-meta">
+              <span>
+                <strong>{product.rating.count > 0 ? product.rating.average.toFixed(1) : "Baru"}</strong>
+                <small>rating pembeli</small>
+              </span>
+              <span>
+                <strong>{product.reviews.length}</strong>
+                <small>ulasan</small>
+              </span>
+              <span>
+                <strong>{product.stock}</strong>
+                <small>stok tersedia</small>
+              </span>
+            </div>
           </div>
 
           <div className="detail-info">
@@ -56,12 +83,15 @@ export default async function ProductDetailPage({
                 {stars(product.rating.average)}
               </span>
               <span>
-                {product.rating.average > 0 ? product.rating.average : "Belum ada rating"}
+                {product.rating.average > 0 ? product.rating.average.toFixed(1) : "Belum ada rating"}
                 {product.rating.count > 0 && ` • ${product.rating.count} ulasan`}
               </span>
             </div>
 
-            <p className="detail-price">{formatRupiah(product.price)}</p>
+            <div className="detail-price-row">
+              <p className="detail-price">{formatRupiah(product.price)}</p>
+              <span className="detail-unit">{unit}</span>
+            </div>
 
             <dl className="detail-facts">
               <div>
@@ -75,42 +105,75 @@ export default async function ProductDetailPage({
                 </dd>
               </div>
               <div>
+                <dt>Satuan</dt>
+                <dd>{unit}</dd>
+              </div>
+              <div>
                 <dt>Penjual</dt>
                 <dd>{product.store.storeName}</dd>
               </div>
               {product.store.location && (
                 <div>
                   <dt>Lokasi</dt>
-                  <dd>📍 {product.store.location}</dd>
+                  <dd>{product.store.location}</dd>
                 </div>
               )}
             </dl>
 
-            <div className="detail-actions">
-              <AddToCartButton
-                product={{
-                  productId: product.id,
-                  name: product.name,
-                  price: product.price,
-                  storeName: product.store.storeName,
-                  stock: product.stock,
-                  image: product.image,
-                }}
-                disabled={habis}
-              />
-            </div>
+            <PurchasePanel
+              product={{
+                id: product.id,
+                name: product.name,
+                price: product.price,
+                storeName: product.store.storeName,
+                stock: product.stock,
+                image: product.image,
+              }}
+              disabled={habis}
+            />
 
             {product.description && (
               <section className="detail-description">
-                <h2>Deskripsi</h2>
+                <h2>Deskripsi produk</h2>
                 <p>{product.description}</p>
               </section>
             )}
+
+            <aside className="detail-seller" aria-label="Informasi penjual">
+              <div className="detail-seller-avatar" aria-hidden="true">
+                {product.store.image ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- aset statis lokal
+                  <img src={product.store.image} alt="" loading="lazy" />
+                ) : (
+                  product.store.storeName.charAt(0)
+                )}
+              </div>
+              <div className="detail-seller-body">
+                <span>Toko penjual</span>
+                <strong>{product.store.storeName}</strong>
+                {product.store.description && <p>{product.store.description}</p>}
+                {product.store.location && (
+                  <small>
+                    <span aria-hidden="true">📍</span> {product.store.location}
+                  </small>
+                )}
+              </div>
+            </aside>
           </div>
         </div>
 
         <section className="detail-reviews" aria-labelledby="reviews-heading">
-          <h2 id="reviews-heading">Ulasan Pembeli ({product.reviews.length})</h2>
+          <div className="detail-section-head">
+            <div>
+              <span className="section-eyebrow">Ulasan pembeli</span>
+              <h2 id="reviews-heading">Apa kata mereka ({product.reviews.length})</h2>
+            </div>
+            {product.rating.average > 0 && (
+              <span className="detail-rating-badge">
+                <span aria-hidden="true">★</span> {product.rating.average.toFixed(1)} / 5
+              </span>
+            )}
+          </div>
 
           {product.reviews.length === 0 ? (
             <div className="market-empty">
@@ -147,7 +210,18 @@ export default async function ProductDetailPage({
 
         {related.length > 0 && (
           <section className="detail-related" aria-labelledby="related-heading">
-            <h2 id="related-heading">Produk Serupa</h2>
+            <div className="detail-section-head">
+              <div>
+                <span className="section-eyebrow">Rekomendasi</span>
+                <h2 id="related-heading">Produk serupa</h2>
+              </div>
+              <Link
+                href={`/products?kategori=${encodeURIComponent(product.category.name)}`}
+                className="section-link"
+              >
+                Lihat kategori <span aria-hidden="true">→</span>
+              </Link>
+            </div>
             <div className="product-grid">
               {related.map((p) => (
                 <ProductCard key={p.id} product={p} />
@@ -157,11 +231,7 @@ export default async function ProductDetailPage({
         )}
       </main>
 
-      <footer className="footer">
-        <div className="container">
-          <p>&copy; {new Date().getFullYear()} Mendung Tirta. Hak cipta dilindungi.</p>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

@@ -3,8 +3,9 @@
 /**
  * Panel Pengaturan API Key AI — untuk halaman Pengaturan Integrasi (hanya Admin).
  *
- * - Menyimpan API Key provider AI chatbot (OpenAI-compatible / NVIDIA NIM / ds.).
- * - Nilai API key TIDAK PERNAH dikirim utuh ke frontend (hanya hint tersamarkan).
+ * - Menyimpan API Key provider AI chatbot Google Gemini.
+ * - Nilai API key TIDAK PERNAH dikirim utuh ke frontend (hanya hint tersamarkan),
+ *   tidak disimpan di localStorage — hanya di server (env / secret terenkripsi).
  * - Menyimpan, menguji koneksi, mengaktifkan/menonaktifkan, dan menghapus.
  * - Konfigurasi aktif dipakai chatbot backend (src/lib/ai.ts → resolveAiRuntime).
  */
@@ -30,14 +31,13 @@ type SafeConfig = {
   lastTestNote: string | null;
 };
 
-const PROVIDERS = [
-  { id: "openai-compatible", label: "OpenAI-compatible (OpenAI / NVIDIA NIM / ds.)" },
-];
+const PROVIDERS = [{ id: "gemini", label: "Google Gemini" }];
 
 function statusBadge(cfg: SafeConfig | null): { label: string; cls: string } {
   if (!cfg) return { label: "Belum dikonfigurasi", cls: "badge-muted" };
+  if (cfg.lastTestOk === false) return { label: "Gagal", cls: "badge-err" };
   if (!cfg.isActive) return { label: "Tersimpan (nonaktif)", cls: "badge-warn" };
-  if (cfg.lastTestOk === true) return { label: "Aktif & teruji", cls: "badge-ok" };
+  if (cfg.lastTestOk === true) return { label: "Aktif", cls: "badge-ok" };
   return { label: "Aktif (belum teruji ulang)", cls: "badge-warn" };
 }
 
@@ -48,8 +48,8 @@ export function ApiKeySettingsPanel() {
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [name, setName] = useState("");
-  const [provider, setProvider] = useState("openai-compatible");
+  const [name, setName] = useState("Google Gemini (Chatbot)");
+  const [provider, setProvider] = useState("gemini");
   const [endpoint, setEndpoint] = useState("");
   const [model, setModel] = useState("");
   const [credential, setCredential] = useState(""); // hanya input baru
@@ -68,7 +68,8 @@ export function ApiKeySettingsPanel() {
     setConfig(cfg);
     if (cfg) {
       setName(cfg.meta?.name ?? "");
-      setProvider(cfg.provider);
+      // Baris lama (provider OpenAI-compatible/NVIDIA) ditampilkan sebagai Gemini.
+      setProvider(cfg.provider === "gemini" ? cfg.provider : "gemini");
       setEndpoint(cfg.endpoint ?? "");
       setModel(cfg.model ?? "");
     }
@@ -259,7 +260,7 @@ export function ApiKeySettingsPanel() {
               value={name}
               onChange={(e) => setName(e.target.value)}
               maxLength={100}
-              placeholder="mis. Chatbot Utama"
+              placeholder="mis. Google Gemini (Chatbot)"
               required
             />
           </label>
@@ -300,7 +301,7 @@ export function ApiKeySettingsPanel() {
               value={endpoint}
               onChange={(e) => setEndpoint(e.target.value)}
               maxLength={500}
-              placeholder="https://api.openai.com/v1"
+              placeholder="https://generativelanguage.googleapis.com/v1beta"
             />
             {fields.endpoint && <span className="field-error">{fields.endpoint}</span>}
           </label>
@@ -312,7 +313,7 @@ export function ApiKeySettingsPanel() {
               value={model}
               onChange={(e) => setModel(e.target.value)}
               maxLength={120}
-              placeholder="mis. gpt-4o-mini"
+              placeholder="mis. gemini-3.5-flash"
             />
           </label>
         </div>
@@ -392,7 +393,7 @@ export function ApiKeySettingsPanel() {
 
       <p className="integration-hint" style={{ marginTop: "0.75rem" }}>
         Jika dihapus atau dinonaktifkan, chatbot kembali memakai API key environment variable
-        (AI_API_KEY) bila ada; jika tidak ada, chatbot menjawab mode fallback berbasis data.
+        (GEMINI_API_KEY) bila ada; jika tidak ada, chatbot menjawab mode fallback berbasis data.
       </p>
     </section>
   );

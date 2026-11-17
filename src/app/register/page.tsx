@@ -93,7 +93,13 @@ export default function RegisterPage() {
                   checked={role === "BUYER"}
                   onChange={() => setRole("BUYER")}
                 />
-                <span className="role-icon" aria-hidden="true">🛒</span>
+                <span className="role-icon" aria-hidden="true">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h7.9a2 2 0 0 0 2-1.6L21 8H6" />
+                    <circle cx="10" cy="20" r="1.3" />
+                    <circle cx="18" cy="20" r="1.3" />
+                  </svg>
+                </span>
                 <span className="role-label">
                   Pembeli
                   <small>Beli perlengkapan & hasil panen</small>
@@ -107,7 +113,13 @@ export default function RegisterPage() {
                   checked={role === "SELLER"}
                   onChange={() => setRole("SELLER")}
                 />
-                <span className="role-icon" aria-hidden="true">🎣</span>
+                <span className="role-icon" aria-hidden="true">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M4 9.5V20h16V9.5" />
+                    <path d="M3 9.5 4.6 5A2 2 0 0 1 6.5 3.5h11A2 2 0 0 1 19.4 5L21 9.5H3Z" />
+                    <path d="M9 20v-6h6v6" />
+                  </svg>
+                </span>
                 <span className="role-label">
                   Penjual
                   <small>Buka toko & jual produk</small>

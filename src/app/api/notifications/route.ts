@@ -1,4 +1,3 @@
-import type { NextRequest } from "next/server";
 import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { ApiError } from "@/lib/validate";
@@ -8,7 +7,7 @@ import { ApiError } from "@/lib/validate";
  * + jumlah belum dibaca. SEMUA query dibatasi ke user sesi (tidak pernah bisa
  * membaca notifikasi user lain).
  */
-export async function GET(_req: NextRequest) {
+export async function GET() {
   try {
     const user = await requireUser();
 

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { DashIcon } from "@/components/layout/DashIcon";
 import { formatRupiah } from "@/components/product/ProductCard";
 
 type OrderListItem = {
@@ -175,16 +176,16 @@ export default function BuyerDashboardPage() {
             <h2>Tautan Cepat</h2>
             <div style={{ display: "flex", flexWrap: "wrap", gap: "0.6rem" }}>
               <Link href="/orders" className="btn btn-outline btn-sm">
-                🧾 Riwayat Pesanan
+                <DashIcon name="receipt" /> Riwayat Pesanan
               </Link>
               <Link href="/products" className="btn btn-outline btn-sm">
-                🛍 Katalog Produk
+                <DashIcon name="bag" /> Katalog Produk
               </Link>
               <Link href="/cart" className="btn btn-outline btn-sm">
-                🛒 Keranjang
+                <DashIcon name="cart" /> Keranjang
               </Link>
               <Link href="/buyer" className="btn btn-outline btn-sm">
-                👤 Informasi Diri &amp; Password
+                <DashIcon name="user" /> Informasi Diri &amp; Password
               </Link>
             </div>
           </section>

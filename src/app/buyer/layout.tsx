@@ -16,9 +16,7 @@ export default async function BuyerLayout({ children }: { children: React.ReactN
   return (
     <div className="market-wrapper">
       <SiteNav />
-      <main className="container" style={{ paddingTop: "1.75rem", paddingBottom: "3.5rem", flex: 1 }}>
-        {children}
-      </main>
+      <main className="container buyer-shell">{children}</main>
     </div>
   );
 }

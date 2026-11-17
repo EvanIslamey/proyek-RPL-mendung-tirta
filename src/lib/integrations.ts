@@ -14,7 +14,8 @@
  *   https://api.fonnte.com — uji koneksi via POST /device, kirim via POST /send
  *   dengan header Authorization token mentah (tanpa Bearer). Provider lama
  *   (Meta Cloud API) TIDAK lagi digunakan untuk pengiriman.
- * - AI_PROVIDER: OpenAI-compatible / NVIDIA NIM (GET {base}/models untuk uji).
+ * - AI_PROVIDER: Google Gemini — API native REST v1beta
+ *   (GET {base}/models untuk uji; auth header x-goog-api-key, key di backend saja).
  * - TELEGRAM: "telegram-bot" (Telegram Bot API). Uji via GET /bot{token}/getMe,
  *   kirim uji via sendMessage ke Chat ID tersimpan — panel khusus ADMIN,
  *   independen dari WhatsApp/Fonnte (toggle satu tidak memengaruhi lainnya).
@@ -38,7 +39,7 @@ import { isValidChatId, sendTelegramMessage } from "./telegram";
 export type IntegrationScope = "" | string; // "" = global (ADMIN); lain = userId (SELLER)
 
 export type WhatsAppProviderId = "fonnte";
-export type AiProviderId = "openai-compatible";
+export type AiProviderId = "gemini";
 export type TelegramProviderId = "telegram-bot";
 
 export const WHATSAPP_PROVIDERS: Record<
@@ -52,9 +53,9 @@ export const WHATSAPP_PROVIDERS: Record<
 };
 
 export const AI_PROVIDERS: Record<AiProviderId, { label: string; defaultBaseUrl: string }> = {
-  "openai-compatible": {
-    label: "OpenAI-compatible (OpenAI / NVIDIA NIM / ds.)",
-    defaultBaseUrl: "https://integrate.api.nvidia.com/v1",
+  gemini: {
+    label: "Google Gemini",
+    defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
   },
 };
 
@@ -397,7 +398,7 @@ export async function testWhatsAppConnection(config: {
   return { ok: r.ok, note: r.note, device: r.data ?? null };
 }
 
-/** Uji koneksi AI: GET {baseUrl}/models dengan Bearer key. */
+/** Uji koneksi AI (Google Gemini): GET {baseUrl}/models dengan header x-goog-api-key. */
 export async function testAiConnection(config: {
   endpoint: string | null;
   credentialEnc: string | null;
@@ -411,7 +412,7 @@ export async function testAiConnection(config: {
     return { ok: false, note: "Credential tersimpan tidak dapat dibaca (kunci enkripsi salah)." };
   }
 
-  const base = (config.endpoint?.trim() || AI_PROVIDERS["openai-compatible"].defaultBaseUrl).replace(
+  const base = (config.endpoint?.trim() || AI_PROVIDERS["gemini"].defaultBaseUrl).replace(
     /\/+$/,
     "",
   );
@@ -420,27 +421,36 @@ export async function testAiConnection(config: {
   try {
     const res = await fetchWithTimeout(url, {
       method: "GET",
-      headers: { Authorization: `Bearer ${key}` },
+      // API Gemini native: API key via header — TIDAK pernah lewat URL/query.
+      headers: { "x-goog-api-key": key },
     });
     if (!res.ok) {
       if (res.status === 401 || res.status === 403) {
         return { ok: false, note: "API key ditolak provider (401/403). Periksa API key." };
       }
+      if (res.status === 429) {
+        return { ok: false, note: "Provider menolak permintaan (HTTP 429 — rate limit). Coba lagi nanti." };
+      }
       return { ok: false, note: `Provider menolak permintaan (HTTP ${res.status}).` };
     }
 
-    // Verifikasi MATERIAL respons, bukan hanya status 200. Sebagian provider
-    // (mis. endpoint /models NVIDIA) mengembalikan katalog publik 200 OK bahkan
-    // untuk key yang tidak valid — status 200 saja BUKAN bukti key diterima.
-    const payload = (await res.json().catch(() => null)) as { data?: unknown } | null;
-    const models = Array.isArray(payload?.data) ? payload.data : null;
-    if (!models || models.length === 0) {
+    // Verifikasi MATERIAL respons, bukan hanya status 200 — daftar model
+    // membuktikan key diterima (bukan sekadar endpoint terjangkau).
+    const payload = (await res.json().catch(() => null)) as
+      | { models?: unknown; data?: unknown }
+      | null;
+    const list = Array.isArray(payload?.models)
+      ? payload.models
+      : Array.isArray(payload?.data)
+        ? payload.data
+        : null;
+    if (!list || list.length === 0) {
       return {
         ok: false,
         note: "Provider tidak mengembalikan daftar model — API key kemungkinan tidak valid.",
       };
     }
-    return { ok: true, note: `Koneksi ke provider AI berhasil (${models.length} model terdaftar).` };
+    return { ok: true, note: `Koneksi ke provider AI berhasil (${list.length} model terdaftar).` };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { ok: false, note: `Gagal menghubungi provider AI: ${sanitizeProviderNote(msg)}` };
@@ -824,9 +834,13 @@ export type AiRuntime = {
  * fallback env agar chatbot tidak pernah crash — sumber fallback ditandai.
  */
 export async function resolveAiRuntime(): Promise<AiRuntime> {
-  const envKey = process.env.AI_API_KEY?.trim() || null;
-  const envBase = (process.env.AI_BASE_URL?.trim() || "https://api.openai.com/v1").replace(/\/+$/, "");
-  const envModel = process.env.AI_MODEL?.trim() || "gpt-4o-mini";
+  // Provider: Google Gemini. Kunci utama dari environment variable GEMINI_API_KEY
+  // (AI_API_KEY dipertahankan sebagai alias lama agar konfigurasi lama tidak putus).
+  const envKey = process.env.GEMINI_API_KEY?.trim() || process.env.AI_API_KEY?.trim() || null;
+  const envBase = (
+    process.env.AI_BASE_URL?.trim() || "https://generativelanguage.googleapis.com/v1beta"
+  ).replace(/\/+$/, "");
+  const envModel = process.env.AI_MODEL?.trim() || "gemini-3.5-flash";
   const envTimeout = (() => {
     const n = Number(process.env.AI_TIMEOUT_MS);
     return Number.isFinite(n) && n >= 1_000 && n <= 120_000 ? n : 30_000;

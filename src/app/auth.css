@@ -123,11 +123,31 @@
   border-radius: 10px;
   background: var(--bg-color);
   cursor: pointer;
+  position: relative;
   transition: var(--transition-fast);
+}
+
+/* Specificity lebih tinggi dari `.auth-field label` (display:block) agar
+   kartu pilihan peran tetap flex dan tidak menumpuk tanpa jarak. */
+.auth-field .role-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+  margin-bottom: 0;
 }
 
 .role-option input {
   position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
   opacity: 0;
   pointer-events: none;
 }
@@ -140,6 +160,10 @@
 
 .role-icon {
   font-size: 1.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
 }
 
 .role-label {

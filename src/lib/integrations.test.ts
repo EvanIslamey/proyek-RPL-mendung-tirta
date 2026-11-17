@@ -62,7 +62,7 @@ function aiConfigRow(p: {
     id: "cfg-1",
     service: "AI_PROVIDER" as const,
     scope: "",
-    provider: "openai-compatible",
+    provider: "gemini",
     credentialHint: null,
     meta: null,
     lastTestAt: null,
@@ -199,6 +199,26 @@ describe("resolveAiRuntime", () => {
     expect(r.model).toBe("env-model");
   });
 
+  it("GEMINI_API_KEY diprioritaskan sebagai var utama provider", async () => {
+    findUnique.mockResolvedValueOnce(null);
+    process.env.GEMINI_API_KEY = "gemini-key-baru";
+    const r = await resolveAiRuntime();
+    expect(r.source).toBe("env");
+    expect(r.apiKey).toBe("gemini-key-baru");
+  });
+
+  it("tanpa env apa pun → default GOOGLE GEMINI (bukan OpenAI/NVIDIA)", async () => {
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.AI_API_KEY;
+    delete process.env.AI_BASE_URL;
+    delete process.env.AI_MODEL;
+    findUnique.mockResolvedValueOnce(null);
+    const r = await resolveAiRuntime();
+    expect(r.baseUrl).toBe("https://generativelanguage.googleapis.com/v1beta");
+    expect(r.model).toBe("gemini-3.5-flash");
+    expect(r.apiKey).toBeNull();
+  });
+
   it("konfigurasi DB AKTIF → diprioritaskan (key dari DB)", async () => {
     findUnique.mockResolvedValueOnce(
       aiConfigRow({
@@ -263,20 +283,33 @@ describe("testAiConnection", () => {
     fetchMock.mockReset();
   });
 
-  it("HTTP 200 dengan daftar model → sukses", async () => {
+  it("HTTP 200 dengan daftar model → sukses (API native Gemini, auth x-goog-api-key)", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ data: [{ id: "model-a" }, { id: "model-b" }] }),
+      json: async () => ({ models: [{ name: "models/model-a" }, { name: "models/model-b" }] }),
     });
     const r = await testAiConnection({ endpoint: null, credentialEnc: encryptSecret("k") });
     expect(r.ok).toBe(true);
+    expect(r.note).toContain("2 model terdaftar");
+    // Permintaan uji: endpoint native + API key HANYA di header backend.
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://generativelanguage.googleapis.com/v1beta/models");
+    expect((init.headers as Record<string, string>)["x-goog-api-key"]).toBe("k");
+    expect(JSON.stringify(init.headers)).not.toContain("Bearer");
   });
 
-  it("HTTP 200 TANPA daftar model (katalog publik) → TIDAK klaim sukses", async () => {
-    // Regresi nyata: endpoint /models NVIDIA mengembalikan 200 + daftar publik
-    // bahkan untuk key yang tidak valid. Status 200 saja bukan bukti key diterima.
-    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [] }) });
+  it("HTTP 429 → gagal dengan pesan rate limit yang jelas", async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 429 });
+    const r = await testAiConnection({ endpoint: null, credentialEnc: encryptSecret("k") });
+    expect(r.ok).toBe(false);
+    expect(r.note).toMatch(/429/);
+    expect(r.note).toMatch(/rate limit/i);
+  });
+
+  it("HTTP 200 TANPA daftar model → TIDAK klaim sukses", async () => {
+    // Status 200 saja bukan bukti key diterima — daftar model harus material.
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ models: [] }) });
     const r = await testAiConnection({ endpoint: null, credentialEnc: encryptSecret("k") });
     expect(r.ok).toBe(false);
 

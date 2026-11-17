@@ -152,7 +152,6 @@ export async function processTelegramUpdate(update: {
 
   const chatId = String(update.message.chat.id);
   const text = update.message.text.trim();
-  const _userId = update.message.from.id;
   const firstName = update.message.from.first_name || "";
 
   // Cek command /start dengan token linking

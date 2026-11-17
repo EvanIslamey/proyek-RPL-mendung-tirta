@@ -3,6 +3,7 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { SiteNav } from "@/components/layout/SiteNav";
+import { SiteFooter } from "@/components/layout/SiteFooter";
 import { ProductCard } from "@/components/product/ProductCard";
 import type { CategoryListItem, ProductListItem } from "@/lib/catalog";
 import "./products.css";
@@ -59,6 +60,27 @@ function ProductsContent() {
       alive = false;
     };
   }, []);
+
+  // Sinkronkan form dengan URL (mis. tombol back/forward atau pill kategori).
+  // Dijadwalkan sebagai microtask agar tidak memicu cascading render sinkron
+  // di dalam effect (aturan react-hooks/set-state-in-effect).
+  useEffect(() => {
+    const q = searchParams.get("q") ?? "";
+    const kat = searchParams.get("kategori") ?? "";
+    const min = searchParams.get("minHarga") ?? "";
+    const max = searchParams.get("maxHarga") ?? "";
+    const avail = searchParams.get("tersedia") === "1";
+    const s = searchParams.get("sort");
+    const sortValue = (s && s in SORT_LABELS ? s : "terbaru") as SortOption;
+    Promise.resolve().then(() => {
+      setSearch(q);
+      setKategori(kat);
+      setMinHarga(min);
+      setMaxHarga(max);
+      setTersedia(avail);
+      setSort(sortValue);
+    });
+  }, [searchParams]);
 
   // Ambil produk setiap kali query string / retry berubah.
   const query = searchParams.toString();
@@ -167,17 +189,61 @@ function ProductsContent() {
       <SiteNav />
 
       <main className="container market-main">
-        <div className="market-header">
-          <div>
-            <h1>Katalog Produk</h1>
+        <div className="market-hero">
+          <div className="market-hero-copy">
+            <span className="section-eyebrow">Katalog Mendung Tirta</span>
+            <h1>Hasil laut segar &amp; perlengkapan pancing pilihan</h1>
             <p className="market-subtitle">
-              Perlengkapan memancing & hasil panen laut segar dari penjual lokal.
+              Belanja langsung dari nelayan dan toko lokal terpercaya. Foto asli, stok
+              diperbarui real-time, harga transparan.
             </p>
           </div>
+          <div className="market-hero-stats" aria-hidden="true">
+            <div>
+              <strong>{data ? data.total : "—"}</strong>
+              <span>produk aktif</span>
+            </div>
+            <div>
+              <strong>{categories.length || "—"}</strong>
+              <span>kategori</span>
+            </div>
+            <div>
+              <strong>100%</strong>
+              <span>penjual lokal</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="category-pills" role="group" aria-label="Filter kategori cepat">
+          <button
+            type="button"
+            className={`category-pill${kategori === "" ? " is-active" : ""}`}
+            onClick={() => applyFilters({ kategori: "" })}
+          >
+            Semua
+            <span>{data?.total ?? "—"}</span>
+          </button>
+          {categories.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              className={`category-pill${kategori.toLowerCase() === c.name.toLowerCase() ? " is-active" : ""}`}
+              onClick={() => applyFilters({ kategori: c.name })}
+            >
+              {c.name}
+              <span>{c.productCount}</span>
+            </button>
+          ))}
         </div>
 
         <form className="market-filters" onSubmit={onSubmit} role="search">
           <div className="filter-search">
+            <span className="filter-search-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="1.9" />
+                <path d="m20 20-3.2-3.2" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+              </svg>
+            </span>
             <input
               type="search"
               placeholder="Cari produk… (mis. joran, kerapu)"
@@ -334,11 +400,7 @@ function ProductsContent() {
         )}
       </main>
 
-      <footer className="footer">
-        <div className="container">
-          <p>&copy; {new Date().getFullYear()} Mendung Tirta. Hak cipta dilindungi.</p>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

@@ -42,7 +42,7 @@ export async function PUT(request: NextRequest) {
     const { user } = await requireIntegrationUser("AI_PROVIDER");
     const body = await parseJsonBody(request);
 
-    const provider = asTrimmedString(body.provider) || "openai-compatible";
+    const provider = asTrimmedString(body.provider) || "gemini";
     if (!(provider in AI_PROVIDERS)) {
       throw new ApiError(400, "Data tidak valid.", { provider: "Provider tidak dikenali." });
     }

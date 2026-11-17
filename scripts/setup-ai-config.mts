@@ -1,8 +1,9 @@
 /**
- * Simpan & aktifkan konfigurasi NVIDIA NIM untuk chatbot melalui API asli
- * (jalur yang sama dengan form halaman Informasi Diri).
+ * Simpan & aktifkan konfigurasi Google Gemini untuk chatbot melalui API asli
+ * (jalur yang sama dengan form halaman Pengaturan Integrasi).
  *
- * - Nilai API key diambil dari environment variable dan TIDAK PERNAH dicetak.
+ * - Nilai API key diambil dari environment variable (GEMINI_API_KEY) dan
+ *   TIDAK PERNAH dicetak.
  * - Uji koneksi dijalankan backend ke provider (hasil aktual dicatat).
  * - Aktivasi hanya setelah uji lolos (guard backend).
  *
@@ -12,12 +13,12 @@ import "dotenv/config";
 
 const BASE = process.env.APP_URL ?? "http://localhost:3000";
 
-const key = process.env.AI_API_KEY?.trim() || "";
+const key = process.env.GEMINI_API_KEY?.trim() || process.env.AI_API_KEY?.trim() || "";
 const baseUrl = process.env.AI_BASE_URL?.trim() || "";
 const model = process.env.AI_MODEL?.trim() || "";
 
 if (!key || !baseUrl || !model) {
-  console.error("GAGAL: AI_API_KEY / AI_BASE_URL / AI_MODEL belum lengkap di .env");
+  console.error("GAGAL: GEMINI_API_KEY / AI_BASE_URL / AI_MODEL belum lengkap di .env");
   process.exit(1);
 }
 
@@ -69,8 +70,8 @@ async function main() {
     method: "PUT",
     cookie,
     body: {
-      name: "NVIDIA NIM (chatbot)",
-      provider: "openai-compatible",
+      name: "Google Gemini (Chatbot)",
+      provider: "gemini",
       endpoint: baseUrl,
       model,
       credential: key,
@@ -138,7 +139,7 @@ async function main() {
     console.error("KEAMANAN: respons GET memuat key mentah — hentikan!");
     process.exit(1);
   }
-  console.log("\nSELESAI: konfigurasi NVIDIA aktif & terhubung ke chatbot.");
+  console.log("\nSELESAI: konfigurasi Google Gemini aktif & terhubung ke chatbot.");
 }
 
 main().catch((e: unknown) => {

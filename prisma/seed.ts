@@ -99,6 +99,7 @@ async function main() {
       storeName: 'Hasil Laut Pak Budi',
       description: 'Menjual tangkapan laut segar setiap pagi langsung dari perahu.',
       location: 'Dermaga Timur',
+      image: '/images/products/kategori-hasil-laut.jpg',
     },
   });
 
@@ -110,30 +111,94 @@ async function main() {
       storeName: 'Pancing Jaya Abadi',
       description: 'Toko perlengkapan memancing terlengkap dan termurah.',
       location: 'Pasar Pesisir',
+      image: '/images/products/kategori-alat-pancing.jpg',
     },
   });
 
   // 4. Create Products (idempoten: nama produk per toko dipakai sebagai kunci).
-  //    Untuk 4 produk demo ini, stok/status dikembalikan ke kondisi awal agar
-  //    seed selalu menghasilkan baseline yang sama untuk demo & pengujian.
+  //    Foto produk disimpan lokal di public/images/products (bukan hotlink),
+  //    sehingga katalog tetap cepat & tidak bergantung pada situs pihak ketiga.
   const productsData = [
     {
       storeId: store1.id,
       categoryId: catHarvest.id,
       name: 'Ikan Kerapu Macan Segar (1 Kg)',
-      description: 'Tangkapan hari ini, sangat segar cocok untuk dibakar atau tim.',
+      description:
+        'Tangkapan hari ini, sangat segar cocok untuk dibakar atau tim. Dikirim dengan es agar kualitas terjaga.',
       price: 85000,
       stock: 15,
       status: ProductStatus.AVAILABLE,
+      image: '/images/products/ikan-kerapu-macan.jpg',
     },
     {
       storeId: store1.id,
       categoryId: catHarvest.id,
       name: 'Cumi-cumi Ring Segar (500 gr)',
-      description: 'Cumi segar siap masak, sudah dibersihkan.',
+      description: 'Cumi segar siap masak, sudah dibersihkan. Cocok untuk cumi goreng tepung atau tumis.',
       price: 45000,
       stock: 8,
       status: ProductStatus.AVAILABLE,
+      image: '/images/products/cumi-cumi-ring.jpg',
+    },
+    {
+      storeId: store1.id,
+      categoryId: catHarvest.id,
+      name: 'Kakap Merah Segar (1 Kg)',
+      description: 'Ikan kakap merah pilihan dengan daging tebal dan manis. Baru naik dari perahu pagi ini.',
+      price: 95000,
+      stock: 12,
+      status: ProductStatus.AVAILABLE,
+      image: '/images/products/kakap-merah.jpg',
+    },
+    {
+      storeId: store1.id,
+      categoryId: catHarvest.id,
+      name: 'Udang Vaname Segar (500 gr)',
+      description: 'Udang vaname segar berukuran sedang, bebas bahan pengawet. Siap untuk berbagai olahan.',
+      price: 62000,
+      stock: 20,
+      status: ProductStatus.AVAILABLE,
+      image: '/images/products/udang-vaname.jpg',
+    },
+    {
+      storeId: store1.id,
+      categoryId: catHarvest.id,
+      name: 'Ikan Tuna Segar (1 Kg)',
+      description: 'Tuna segar dengan daging merah padat, ideal untuk steak tuna atau sashimi.',
+      price: 120000,
+      stock: 6,
+      status: ProductStatus.AVAILABLE,
+      image: '/images/products/ikan-tuna.jpg',
+    },
+    {
+      storeId: store1.id,
+      categoryId: catHarvest.id,
+      name: 'Ikan Tongkol Segar (1 Kg)',
+      description: 'Tongkol segar ukuran sedang, cocok untuk ikan balado, pindang, atau pepes.',
+      price: 38000,
+      stock: 25,
+      status: ProductStatus.AVAILABLE,
+      image: '/images/products/ikan-tongkol.jpg',
+    },
+    {
+      storeId: store1.id,
+      categoryId: catHarvest.id,
+      name: 'Kepiting Segar (1 Kg)',
+      description: 'Kepiting bakau segar pilihan, masih hidup saat dikemas. Manis dan berdaging tebal.',
+      price: 135000,
+      stock: 10,
+      status: ProductStatus.AVAILABLE,
+      image: '/images/products/kepiting-segar.jpg',
+    },
+    {
+      storeId: store1.id,
+      categoryId: catHarvest.id,
+      name: 'Lobster Segar (500 gr)',
+      description: 'Lobster segar berkualitas ekspor dengan daging lembut dan manis.',
+      price: 240000,
+      stock: 4,
+      status: ProductStatus.AVAILABLE,
+      image: '/images/products/lobster-segar.jpg',
     },
     {
       storeId: store2.id,
@@ -143,6 +208,37 @@ async function main() {
       price: 150000,
       stock: 20,
       status: ProductStatus.AVAILABLE,
+      image: '/images/products/joran-tegek.jpg',
+    },
+    {
+      storeId: store2.id,
+      categoryId: catFishingGear.id,
+      name: 'Reel Pancing Spinning 4000',
+      description: 'Reel spinning ukuran 4000 dengan drag halus, cocok untuk casting di laut maupun air tawar.',
+      price: 185000,
+      stock: 18,
+      status: ProductStatus.AVAILABLE,
+      image: '/images/products/reel-spinning.jpg',
+    },
+    {
+      storeId: store2.id,
+      categoryId: catFishingGear.id,
+      name: 'Senar Pancing PE 0.8mm (100m)',
+      description: 'Senar PE 8 lapis dengan kekuatan tarik tinggi, anti kusut dan tahan gesekan.',
+      price: 55000,
+      stock: 30,
+      status: ProductStatus.AVAILABLE,
+      image: '/images/products/senar-pe.jpg',
+    },
+    {
+      storeId: store2.id,
+      categoryId: catFishingGear.id,
+      name: 'Kail Pancing No. 5 (isi 50)',
+      description: 'Kail baja karbon tajam dan anti karat, isi 50 pcs per pack.',
+      price: 18000,
+      stock: 40,
+      status: ProductStatus.AVAILABLE,
+      image: '/images/products/kail-pancing.jpg',
     },
     {
       storeId: store2.id,
@@ -152,6 +248,17 @@ async function main() {
       price: 35000,
       stock: 50,
       status: ProductStatus.AVAILABLE,
+      image: '/images/products/umpan-minnow.jpg',
+    },
+    {
+      storeId: store2.id,
+      categoryId: catFishingGear.id,
+      name: 'Kotak Peralatan Pancing',
+      description: 'Kotak tackle serbaguna dengan banyak sekat, kuat dan tahan air untuk menyimpan umpan & kail.',
+      price: 125000,
+      stock: 12,
+      status: ProductStatus.AVAILABLE,
+      image: '/images/products/kotak-pancing.jpg',
     },
   ];
 
@@ -163,7 +270,7 @@ async function main() {
     if (existing) {
       await prisma.product.update({
         where: { id: existing.id },
-        data: { price: p.price, stock: p.stock, status: p.status },
+        data: { price: p.price, stock: p.stock, status: p.status, image: p.image },
       });
     } else {
       await prisma.product.create({ data: p });

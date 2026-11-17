@@ -14,12 +14,52 @@ type NotificationItem = {
   createdAt: string;
 };
 
-const KIND_ICON: Record<string, string> = {
-  ORDER_CREATED: "📦",
-  ORDER_STATUS_CHANGED: "🔄",
-  PAYMENT_CONFIRMED: "✅",
-  STOCK_LOW: "📉",
-  ACCOUNT_ALERT: "ℹ️",
+const Svg = ({ children }: { children: React.ReactNode }) => (
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.7"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    {children}
+  </svg>
+);
+
+const KIND_ICON: Record<string, React.ReactNode> = {
+  ORDER_CREATED: (
+    <Svg>
+      <path d="m12 3 8 4v10l-8 4-8-4V7l8-4Z" />
+      <path d="m4 7 8 4 8-4M12 11v10" />
+    </Svg>
+  ),
+  ORDER_STATUS_CHANGED: (
+    <Svg>
+      <path d="M20 11a8 8 0 1 0-2.3 5.7" />
+      <path d="M20 4v7h-7" />
+    </Svg>
+  ),
+  PAYMENT_CONFIRMED: (
+    <Svg>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="m8 12.5 2.8 2.8L16 9.5" />
+    </Svg>
+  ),
+  STOCK_LOW: (
+    <Svg>
+      <path d="M4 19V9M10 19V5M16 19v-7M22 19H2" />
+    </Svg>
+  ),
+  ACCOUNT_ALERT: (
+    <Svg>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 11v5M12 8h.01" />
+    </Svg>
+  ),
 };
 
 function formatTime(iso: string): string {
@@ -148,7 +188,7 @@ export function NotificationBell() {
           </div>
           <div className="nb-list">
             {items.length === 0 && (
-              <p className="nb-empty">Tidak ada notifikasi. Belanja untuk mendapat update. 🌊</p>
+              <p className="nb-empty">Tidak ada notifikasi. Belanja untuk mendapat update.</p>
             )}
             {items.map((n) => (
               <button
@@ -158,7 +198,12 @@ export function NotificationBell() {
                 onClick={() => void handleItem(n)}
               >
                 <span className="nb-item-icon" aria-hidden="true">
-                  {KIND_ICON[n.kind] ?? "🔔"}
+                  {KIND_ICON[n.kind] ?? (
+                    <Svg>
+                      <path d="M18 8a6 6 0 1 0-12 0c0 6-2 7-2 7h16s-2-1-2-7Z" />
+                      <path d="M10.5 20a2 2 0 0 0 3 0" />
+                    </Svg>
+                  )}
                 </span>
                 <span className="nb-item-body">
                   <span className="nb-item-title">{n.title}</span>

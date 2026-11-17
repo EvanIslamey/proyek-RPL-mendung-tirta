@@ -422,8 +422,10 @@ describe("generateReply — kondisi provider AI", () => {
     vi.restoreAllMocks();
   });
 
-  it("tanpa AI_API_KEY → fallback + tidak pernah menampilkan key", async () => {
+  it("tanpa GEMINI_API_KEY → fallback + tidak pernah menampilkan key", async () => {
+    const prevGem = process.env.GEMINI_API_KEY;
     const prevKey = process.env.AI_API_KEY;
+    delete process.env.GEMINI_API_KEY;
     delete process.env.AI_API_KEY;
     const info = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
@@ -437,8 +439,9 @@ describe("generateReply — kondisi provider AI", () => {
       expect(r.fallbackReason).toBe("no-ai-config");
       expect(r.reply).toContain("Berikut data terkini dari aplikasi");
       const logged = info.mock.calls.flat().join(" ");
-      expect(logged).not.toMatch(/nvapi-|Bearer|sk-/i);
+      expect(logged).not.toMatch(/AIza|nvapi-|Bearer|sk-/i);
     } finally {
+      if (prevGem !== undefined) process.env.GEMINI_API_KEY = prevGem;
       if (prevKey !== undefined) process.env.AI_API_KEY = prevKey;
     }
   });
@@ -496,10 +499,16 @@ describe("generateReply — kondisi provider AI", () => {
       expect(logged).toContain("[ai]");
       expect(logged).not.toContain("test-key-rahasia-jangan-log");
     } finally {
-      process.env.AI_API_KEY = prev.key;
-      process.env.AI_BASE_URL = prev.base;
-      process.env.AI_MODEL = prev.model;
-      process.env.AI_TIMEOUT_MS = prev.timeout;
+      // Restore bersih: `process.env.X = undefined` akan tersimpan sebagai
+      // string "undefined" dan meracuni test berikutnya — hapus saja bila kosong.
+      if (prev.key !== undefined) process.env.AI_API_KEY = prev.key;
+      else delete process.env.AI_API_KEY;
+      if (prev.base !== undefined) process.env.AI_BASE_URL = prev.base;
+      else delete process.env.AI_BASE_URL;
+      if (prev.model !== undefined) process.env.AI_MODEL = prev.model;
+      else delete process.env.AI_MODEL;
+      if (prev.timeout !== undefined) process.env.AI_TIMEOUT_MS = prev.timeout;
+      else delete process.env.AI_TIMEOUT_MS;
     }
   });
 
@@ -529,7 +538,7 @@ describe("generateReply — kondisi provider AI", () => {
       ),
     );
     const prev = { key: process.env.AI_API_KEY, base: process.env.AI_BASE_URL };
-    process.env.AI_API_KEY = "nvapi-test-tidak-valid";
+    process.env.AI_API_KEY = "AIza-test-tidak-valid";
     process.env.AI_BASE_URL = "https://example.invalid/v1";
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
@@ -543,33 +552,36 @@ describe("generateReply — kondisi provider AI", () => {
       expect(r.fallbackReason).toBe("provider-error");
       const logged = warn.mock.calls.flat().join(" ");
       expect(logged).toContain("provider HTTP 401");
-      expect(logged).not.toContain("nvapi-test-tidak-valid");
+      expect(logged).not.toContain("AIza-test-tidak-valid");
     } finally {
       process.env.AI_API_KEY = prev.key;
       process.env.AI_BASE_URL = prev.base;
     }
   });
 
-  it("respons AI valid → sumber 'ai', marker [produk:id] divalidasi ke grounding", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
+  it("respons AI valid (API native Gemini) → sumber 'ai', marker [produk:id] divalidasi ke grounding", async () => {
+    const fetchSpy = vi.fn(
+      async () =>
         new Response(
           JSON.stringify({
-            choices: [
+            candidates: [
               {
-                message: {
-                  content: `Stok Ikan Kerapu saat ini 4. [produk:${kerapu.id}] [produk:00000000-0000-0000-0000-000000000000]`,
+                content: {
+                  parts: [
+                    {
+                      text: `Stok Ikan Kerapu saat ini 4. [produk:${kerapu.id}] [produk:00000000-0000-0000-0000-000000000000]`,
+                    },
+                  ],
                 },
               },
             ],
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
-      ),
     );
-    const prev = { key: process.env.AI_API_KEY, base: process.env.AI_BASE_URL };
-    process.env.AI_API_KEY = "nvapi-test";
+    vi.stubGlobal("fetch", fetchSpy);
+    const prev = { key: process.env.GEMINI_API_KEY, base: process.env.AI_BASE_URL };
+    process.env.GEMINI_API_KEY = "AIza-test-key";
     process.env.AI_BASE_URL = "https://example.invalid/v1";
     try {
       const r = await generateReply({
@@ -585,8 +597,25 @@ describe("generateReply — kondisi provider AI", () => {
       expect(r.reply).not.toContain("[produk:");
       // Hanya id dari grounding yang dipakai — id karangan model dibuang.
       expect(r.products.map((p) => p.id)).toEqual([kerapu.id]);
+
+      // Format request benar: endpoint native, key hanya di header backend.
+      const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+      expect(url).toBe("https://example.invalid/v1/models/gemini-3.5-flash:generateContent");
+      expect((init.headers as Record<string, string>)["x-goog-api-key"]).toBe("AIza-test-key");
+      expect(JSON.stringify(init.headers)).not.toContain("Bearer");
+      const body = JSON.parse(String(init.body)) as {
+        contents?: { role?: string }[];
+        systemInstruction?: { parts?: { text?: string }[] };
+      };
+      expect(Array.isArray(body.contents)).toBe(true);
+      expect(body.contents?.every((c) => c.role === "user" || c.role === "model")).toBe(true);
+      expect(body.systemInstruction?.parts?.length).toBeGreaterThan(0);
+      // API key TIDAK PERNAH masuk badan permintaan.
+      expect(String(init.body)).not.toContain("AIza-test-key");
     } finally {
-      process.env.AI_API_KEY = prev.key;
+      vi.unstubAllGlobals();
+      if (prev.key !== undefined) process.env.GEMINI_API_KEY = prev.key;
+      else delete process.env.GEMINI_API_KEY;
       process.env.AI_BASE_URL = prev.base;
     }
   });
@@ -599,7 +628,7 @@ describe("generateReply — kondisi provider AI", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const prev = { key: process.env.AI_API_KEY, base: process.env.AI_BASE_URL };
-    process.env.AI_API_KEY = "nvapi-test";
+    process.env.AI_API_KEY = "AIza-test";
     process.env.AI_BASE_URL = "https://example.invalid/v1";
     try {
       const r = await generateReply({
@@ -625,7 +654,7 @@ describe("generateReply — kondisi provider AI", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const prev = { key: process.env.AI_API_KEY, base: process.env.AI_BASE_URL };
-    process.env.AI_API_KEY = "nvapi-test";
+    process.env.AI_API_KEY = "AIza-test";
     process.env.AI_BASE_URL = "https://example.invalid/v1";
     try {
       const r = await generateReply({
@@ -657,7 +686,7 @@ describe("generateReply — kondisi provider AI", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const prev = { key: process.env.AI_API_KEY };
-    process.env.AI_API_KEY = "nvapi-test";
+    process.env.AI_API_KEY = "AIza-test";
     try {
       const r = await generateReply({
         message: "udang di bawah 10000",
@@ -685,7 +714,7 @@ describe("generateReply — kondisi provider AI", () => {
     });
     vi.stubGlobal("fetch", fetchSpy);
     const prev = { key: process.env.AI_API_KEY, base: process.env.AI_BASE_URL };
-    process.env.AI_API_KEY = "nvapi-test";
+    process.env.AI_API_KEY = "AIza-test";
     process.env.AI_BASE_URL = "https://example.invalid/v1";
     try {
       const r = await generateReply({
@@ -706,9 +735,9 @@ describe("generateReply — kondisi provider AI", () => {
     }
   });
 
-  it("streamReply — SSE provider → delta mengalir, marker dibersihkan, done final", async () => {
+  it("streamReply — SSE native Gemini → delta mengalir, marker dibersihkan, done final", async () => {
     const chunk = (text: string): string =>
-      `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`;
+      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] })}\n\n`;
     // Sengaja potong marker di tengah antar-chunk → sanitizer harus menahannya
     // sehingga penampil TIDAK PERNAH memperlihatkan "[produk:…]" mentah.
     const sse =
@@ -716,24 +745,22 @@ describe("generateReply — kondisi provider AI", () => {
       chunk(`duk:${kerapu.id}] Utamakan yang segar.`) +
       "data: [DONE]\n\n";
     const encoder = new TextEncoder();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response(
-            new ReadableStream<Uint8Array>({
-              start(c) {
-                c.enqueue(encoder.encode(sse.slice(0, 40)));
-                c.enqueue(encoder.encode(sse.slice(40)));
-                c.close();
-              },
-            }),
-            { status: 200, headers: { "Content-Type": "text/event-stream" } },
-          ),
-      ),
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              c.enqueue(encoder.encode(sse.slice(0, 40)));
+              c.enqueue(encoder.encode(sse.slice(40)));
+              c.close();
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        ),
     );
+    vi.stubGlobal("fetch", fetchSpy);
     const prev = { key: process.env.AI_API_KEY, base: process.env.AI_BASE_URL };
-    process.env.AI_API_KEY = "nvapi-test";
+    process.env.AI_API_KEY = "AIza-test";
     process.env.AI_BASE_URL = "https://example.invalid/v1";
     try {
       const deltas: string[] = [];
@@ -755,6 +782,12 @@ describe("generateReply — kondisi provider AI", () => {
       expect(final?.result.reply).toContain("Stok Ikan Kerapu saat ini 4.");
       expect(final?.result.reply).not.toContain("[produk:");
       expect(final?.result.products.map((p) => p.id)).toEqual([kerapu.id]);
+
+      // Format request streaming: endpoint native SSE + key hanya di header.
+      const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+      expect(url).toBe("https://example.invalid/v1/models/gemini-3.5-flash:streamGenerateContent?alt=sse");
+      expect((init.headers as Record<string, string>)["x-goog-api-key"]).toBe("AIza-test");
+      expect(String(init.body)).not.toContain("AIza-test");
     } finally {
       vi.unstubAllGlobals();
       process.env.AI_API_KEY = prev.key;
@@ -772,7 +805,7 @@ describe("generateReply — kondisi provider AI", () => {
     );
     vi.stubGlobal("fetch", fetchSpy);
     const prev = { key: process.env.AI_API_KEY, base: process.env.AI_BASE_URL };
-    process.env.AI_API_KEY = "nvapi-test-tidak-valid";
+    process.env.AI_API_KEY = "AIza-test-tidak-valid";
     process.env.AI_BASE_URL = "https://example.invalid/v1";
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
@@ -791,7 +824,7 @@ describe("generateReply — kondisi provider AI", () => {
       expect(final?.result.source).toBe("fallback");
       expect(final?.result.fallbackReason).toBe("provider-error");
       const logged = warn.mock.calls.flat().join(" ");
-      expect(logged).not.toContain("nvapi-test-tidak-valid");
+      expect(logged).not.toContain("AIza-test-tidak-valid");
     } finally {
       vi.unstubAllGlobals();
       vi.restoreAllMocks();
@@ -1009,6 +1042,19 @@ describe("extractSubjectPhrase — ekstraksi subjek dari bahasa Indonesia", () =
 
   it("atribut non-produk bukan subjek: 'Bagaimana status pesanan saya?' → null", () => {
     expect(extractSubjectPhrase("Bagaimana status pesanan saya?")).toBeNull();
+  });
+
+  it("kata berhenti pencarian bukan subjek (regresi 'Ada produk apa saja?')", () => {
+    // Regresi: frasa "apa"/"aja"/"coba kasih lihat" dulu lolos jadi subjek
+    // name-mode → pencarian 0 baris → default telusuri katalog mati → AI
+    // kehilangan konteks dan mengarang "tidak ada produk".
+    expect(extractSubjectPhrase("Ada produk apa saja?")).toBeNull();
+    expect(extractSubjectPhrase("Jual apa aja?")).toBeNull();
+    expect(extractSubjectPhrase("Coba kasih lihat semua barang.")).toBeNull();
+    expect(extractSubjectPhrase("Produk yang mana?")).toBeNull();
+    // Konten nyata TETAP jadi subjek (kata bermakna bukan stopword).
+    expect(extractSubjectPhrase("Adakah perahu?")).toBe("perahu");
+    expect(extractSubjectPhrase("Ikan kerapu yang tersedia?")).toBe("ikan kerapu");
   });
 });
 
@@ -1228,5 +1274,312 @@ describe("fallbackResult — filter subjek + harga (daftar terfilter, bukan ring
     expect(r.reply).toContain("1 produk hasil laut");
     expect(r.products).toEqual([]);
     expect(r.reply).not.toContain("Ringkasan katalog");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* CRITICAL FIX — intent non-katalog TIDAK PERNAH dijawab produk       */
+/* ------------------------------------------------------------------ */
+
+describe("fallback intent non-katalog (hapus fallback salah)", () => {
+  const revenueSection: ContextSection = {
+    key: "revenue",
+    label: "Total pendapatan toko (data aktual)",
+    scope: "toko-sendiri",
+    asOf: GEN_AT,
+    text:
+      "Total pendapatan toko Anda adalah Rp1.250.000 berdasarkan pesanan dengan status yang " +
+      "memenuhi kriteria perhitungan (Diproses, Dikirim, Siap Diambil, dan Selesai), " +
+      "pada periode seluruh periode data (sejak awal catatan transaksi).",
+  };
+  const buyerRevenueLimit: ContextSection = {
+    key: "revenue",
+    label: "Keterbatasan data pendapatan (admin)",
+    scope: "admin",
+    asOf: GEN_AT,
+    text:
+      "Pendapatan adalah data internal marketplace — hanya tersedia untuk admin " +
+      "(pendapatan marketplace) dan penjual (pendapatan toko sendiri).",
+  };
+
+  it("REVENUE + section pendapatan → nominal + status + periode, TANPA produk", () => {
+    const r = fallbackResult({
+      message: "Berapa total pendapatan?",
+      products: [kerapu], // konteks produk tidak boleh menyusup ke jawaban pendapatan
+      contextProducts: [kerapu],
+      sections: [revenueSection],
+      generatedAt: GEN_AT,
+      intent: "REVENUE",
+    });
+    expect(r.reply).toContain("Rp1.250.000");
+    expect(r.reply).toMatch(/Diproses, Dikirim, Siap Diambil/);
+    expect(r.reply).toMatch(/periode/);
+    expect(r.reply).not.toContain("Ikan Kerapu");
+    expect(r.reply).not.toMatch(/Berikut produk|Rekomendasi/i);
+    expect(r.products).toEqual([]);
+  });
+
+  it("REVENUE gagal → pesan kegagalan data pendapatan (katalog tidak dipakai, angka tidak dikarang)", () => {
+    const r = fallbackResult({
+      message: "Berapa total pendapatan?",
+      products: [kerapu, cumi],
+      contextProducts: [kerapu],
+      sections: [catalogSection], // ringkasan katalog DIKUCILKAN untuk intent pendapatan
+      generatedAt: GEN_AT,
+      intent: "REVENUE",
+    });
+    expect(r.reply).toContain("Data pendapatan belum dapat diambil");
+    expect(r.reply).not.toMatch(/Berikut produk|Rekomendasi|Ringkasan katalog/i);
+    expect(r.reply).not.toMatch(/Rp\d/); // tidak ada angka karangan
+    expect(r.products).toEqual([]);
+  });
+
+  it("REVENUE peran BUYER → penolakan peran jujur, tanpa angka pendapatan", () => {
+    const r = fallbackResult({
+      message: "Berapa pendapatan toko saya?",
+      products: [],
+      sections: [buyerRevenueLimit],
+      generatedAt: GEN_AT,
+      intent: "REVENUE",
+    });
+    expect(r.reply).toMatch(/hanya tersedia untuk admin/i);
+    expect(r.reply).not.toMatch(/Rp\d/);
+    expect(r.products).toEqual([]);
+  });
+
+  it("ORDER_COUNT tanpa section → pesan jumlah pesanan yang jujur, bukan katalog", () => {
+    const r = fallbackResult({
+      message: "Berapa jumlah pesanan?",
+      products: [joran],
+      sections: [],
+      generatedAt: GEN_AT,
+      intent: "ORDER_COUNT",
+    });
+    expect(r.reply).toContain("Jumlah pesanan belum dapat diambil");
+    expect(r.reply).not.toMatch(/Berikut produk|Rp\d/i);
+    expect(r.products).toEqual([]);
+  });
+
+  /* ---- Pemisahan role vs akun (USER_ROLES / ROLE_PERMISSION / USER_LIST) ---- */
+  const rolesSection: ContextSection = {
+    key: "roles",
+    label: "Role pengguna & hak akses (definisi aplikasi)",
+    scope: "publik",
+    asOf: GEN_AT,
+    text:
+      "Role pengguna di Mendung Tirta ada 3: ADMIN, SELLER (Penjual), BUYER (Pembeli).\n\n" +
+      "ADMIN (Administrator):\n- Mengelola pengguna\n\n" +
+      "SELLER (Penjual):\n- Mengelola toko\n\n" +
+      "BUYER (Pembeli):\n- Melihat dan mencari produk",
+  };
+  const accountSection: ContextSection = {
+    key: "account",
+    label: "Informasi akun Anda",
+    scope: "milik-sendiri",
+    asOf: GEN_AT,
+    text: "Nama: Andi Kurniawan\nEmail: andi@contoh.id\nPeran: Pembeli",
+  };
+
+  it("USER_ROLES → jawaban role, TANPA profil akun & TANPA produk", () => {
+    const r = fallbackResult({
+      message: "Ada apa saja role pengguna?",
+      products: [kerapu],
+      contextProducts: [kerapu],
+      // Profil akun TIDAK BOLEH menyusup walau kebetulan ada di sections.
+      sections: [rolesSection, accountSection],
+      generatedAt: GEN_AT,
+      intent: "USER_ROLES",
+    });
+    expect(r.reply).toContain("ADMIN (Administrator)");
+    expect(r.reply).toContain("SELLER (Penjual)");
+    expect(r.reply).toContain("BUYER (Pembeli)");
+    expect(r.reply).not.toContain("Andi Kurniawan");
+    expect(r.reply).not.toContain("andi@contoh.id");
+    expect(r.products).toEqual([]);
+    expect(r.reply).not.toMatch(/Berikut produk|Rekomendasi/i);
+  });
+
+  it("ROLE_PERMISSION → hak akses role saja, tanpa profil akun", () => {
+    const dutySection: ContextSection = {
+      key: "roles",
+      label: "Hak akses role (definisi aplikasi)",
+      scope: "publik",
+      asOf: GEN_AT,
+      text:
+        "Hak akses ADMIN (Administrator) di Mendung Tirta:\n" +
+        "- Mengelola pengguna\n- Memantau pesanan dan transaksi",
+    };
+    const r = fallbackResult({
+      message: "Apa tugas admin?",
+      products: [],
+      sections: [dutySection, accountSection],
+      generatedAt: GEN_AT,
+      intent: "ROLE_PERMISSION",
+    });
+    expect(r.reply).toContain("Hak akses ADMIN");
+    expect(r.reply).toContain("Mengelola pengguna");
+    expect(r.reply).not.toContain("Andi Kurniawan");
+    expect(r.products).toEqual([]);
+  });
+
+  it("USER_LIST (admin) → daftar pengguna dari data; tanpa email & produk", () => {
+    const listSection: ContextSection = {
+      key: "userlist",
+      label: "Daftar pengguna (3 akun)",
+      scope: "admin",
+      asOf: GEN_AT,
+      text: "Daftar pengguna terdaftar (3):\n- Andi (Penjual)\n- Budi (Pembeli)\n- Citra (Admin)",
+    };
+    const r = fallbackResult({
+      message: "Daftar pengguna",
+      products: [kerapu],
+      sections: [listSection],
+      generatedAt: GEN_AT,
+      intent: "USER_LIST",
+    });
+    expect(r.reply).toContain("Daftar pengguna terdaftar (3)");
+    expect(r.reply).not.toMatch(/@/); // tanpa email (PII)
+    expect(r.products).toEqual([]);
+  });
+
+  it("USER_LIST tanpa section → pesan penolakan/kegagalan jujur, bukan katalog", () => {
+    const r = fallbackResult({
+      message: "Daftar pengguna",
+      products: [joran],
+      sections: [],
+      generatedAt: GEN_AT,
+      intent: "USER_LIST",
+    });
+    expect(r.reply).toContain("Daftar pengguna belum dapat diambil");
+    expect(r.reply).not.toMatch(/Berikut produk|Rekomendasi/i);
+    expect(r.products).toEqual([]);
+  });
+
+  it("USER_ROLES tanpa section → pesan kegagalan role, bukan katalog", () => {
+    const r = fallbackResult({
+      message: "Ada apa saja role pengguna?",
+      products: [kerapu, cumi],
+      sections: [],
+      generatedAt: GEN_AT,
+      intent: "USER_ROLES",
+    });
+    expect(r.reply).toContain("Informasi role dan hak aksesnya belum dapat dimuat");
+    expect(r.reply).not.toMatch(/Berikut produk|Rekomendasi|Rp\d/i);
+    expect(r.products).toEqual([]);
+  });
+
+  it("intent produk TETAP boleh menampilkan produk (GENERAL tidak terdampak)", () => {
+    const r = fallbackResult({
+      message: "Ada ikan kerapu?",
+      products: [kerapu],
+      sections: [],
+      generatedAt: GEN_AT,
+      intent: "PRODUCT_SEARCH",
+    });
+    expect(r.products.map((p) => p.name)).toEqual(["Ikan Kerapu Macan Segar (1 Kg)"]);
+  });
+
+  it("generateReply REVENUE → jalur direct instan, TANPA panggilan provider & TANPA produk", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("provider tidak boleh dipanggil untuk intent pendapatan");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const r = await generateReply({
+        message: "Berapa total pendapatan?",
+        history: [],
+        products: [kerapu],
+        contextProducts: [kerapu],
+        sections: [revenueSection],
+        intent: "REVENUE",
+      });
+      expect(r.reply).toContain("Rp1.250.000");
+      expect(r.fallbackReason).toBe("direct");
+      expect(r.products).toEqual([]);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("generateReply REVENUE tanpa section → kegagalan jujur, provider & produk tetap tidak disentuh", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("provider tidak boleh dipanggil untuk intent pendapatan");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const r = await generateReply({
+        message: "Berapa total pendapatan?",
+        history: [],
+        products: [kerapu],
+        sections: [],
+        intent: "REVENUE",
+      });
+      expect(r.reply).toContain("Data pendapatan belum dapat diambil");
+      expect(r.fallbackReason).toBe("direct");
+      expect(r.products).toEqual([]);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("generateReply USER_ROLES → jalur direct instan, TANPA provider & TANPA produk walau riwayat memuat produk", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("provider tidak boleh dipanggil untuk intent role");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const r = await generateReply({
+        message: "Ada apa saja role pengguna?",
+        history: [
+          { role: "user", content: "Ada ikan kerapu?" },
+          { role: "assistant", content: "Ikan Kerapu Macan Segar (1 Kg) — Rp85.000 (stok 15)" },
+        ],
+        products: [kerapu],
+        contextProducts: [kerapu], // riwayat produk tidak boleh menyusup ke jawaban role
+        sections: [rolesSection],
+        intent: "USER_ROLES",
+      });
+      expect(r.reply).toContain("ADMIN (Administrator)");
+      expect(r.reply).not.toContain("Ikan Kerapu");
+      expect(r.fallbackReason).toBe("direct");
+      expect(r.products).toEqual([]);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("sapaan murni dijawab perkenalan diri WALAU riwayat memuat produk", async () => {
+    const r = await generateReply({
+      message: "Siapa kamu?",
+      history: [
+        { role: "user", content: "Ada ikan kerapu?" },
+        {
+          role: "assistant",
+          content: "Ikan Kerapu Macan Segar (1 Kg) — Rp85.000 (stok 15)",
+        },
+      ],
+      products: [kerapu],
+      contextProducts: [kerapu, cumi], // riwayat produk TIDAK boleh membajak sapaan
+      sections: [],
+    });
+    expect(r.reply).toMatch(/Mendung Tirta/);
+    expect(r.products).toEqual([]);
+    expect(r.fallbackReason).toBe("direct");
+  });
+
+  it("pesan ber-data dengan awalan sapaan TETAP bukan sapaan (jalur data menang)", async () => {
+    const r = await generateReply({
+      message: "Halo, berapa jumlah penjual?",
+      history: [],
+      products: [kerapu],
+      sections: [countSection],
+      intent: "SELLER_INFO",
+    });
+    expect(r.reply).toContain("penjual");
+    expect(r.reply).not.toMatch(/^Halo!/);
+    expect(r.fallbackReason).toBe("direct");
   });
 });
