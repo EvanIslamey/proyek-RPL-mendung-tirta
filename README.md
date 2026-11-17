@@ -1,9 +1,13 @@
 # Mendung Tirta
 Nama	: Evan Islamey Yuwan Janitra
 NIM	: 41257100
+Kelas: TI 1A 2025
 Kelompok	: 6
 Tema	: Sistem Informasi Berbasis Web untuk Pemberdayaan UMKM Cerdas
 Topik : Pengembangan Ekosistem Ekonomi Digital melalui Pengelolaan Sampah Elektronik dan Pemberdayaan UMKM
+
+
+LINK VIDEO FINAL : https://youtu.be/1HkJM7KQsik
 
 Marketplace lokal untuk **hasil panen laut segar** dan **perlengkapan memancing** — menghubungkan nelayan/pembudidaya dengan pembeli rumah tangga, restoran, dan pemancing. Dibangun dengan Next.js (App Router), Prisma ORM, dan PostgreSQL.
 
