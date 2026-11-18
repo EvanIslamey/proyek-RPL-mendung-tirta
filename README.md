@@ -7,7 +7,7 @@ Tema	: Sistem Informasi Berbasis Web untuk Pemberdayaan UMKM Cerdas
 Topik : Pengembangan Ekosistem Ekonomi Digital melalui Pengelolaan Sampah Elektronik dan Pemberdayaan UMKM
 
 
-LINK VIDEO FINAL : https://youtu.be/1HkJM7KQsik
+LINK VIDEO FINAL : https://youtu.be/1HkJM7KQsik?si=c5-3KqCD5z964YqE
 
 Marketplace lokal untuk **hasil panen laut segar** dan **perlengkapan memancing** — menghubungkan nelayan/pembudidaya dengan pembeli rumah tangga, restoran, dan pemancing. Dibangun dengan Next.js (App Router), Prisma ORM, dan PostgreSQL.
 
